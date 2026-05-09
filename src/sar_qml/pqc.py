@@ -266,6 +266,33 @@ class PQCClassifier:
             weight_decay,
         )
 
+    def _make_jax_fullbatch_step(self):
+        """Build a jax.jit-compiled full-batch training step.
+
+        Avoids Catalyst's O(N) MLIR unrolling — safe for N up to ~10k.
+        Uses PennyLane's native batch execution + adjoint VJP registered
+        via jax.custom_vjp, so gradients are exact (adjoint method).
+        """
+        opt = self.get_optimizer()
+        loss_fn = self.loss  # captures self
+
+        if self.use_double_reuploading:
+            @jax.jit
+            def run_step(weights, opt_state, train_x, train_f, train_y):
+                loss_val, grads = jax.value_and_grad(loss_fn)(weights, (train_x, train_f), train_y)
+                updates, new_opt_state = opt.update(grads, opt_state, weights)
+                new_weights = optax.apply_updates(weights, updates)
+                return new_weights, new_opt_state, loss_val
+        else:
+            @jax.jit
+            def run_step(weights, opt_state, train_x, train_y):
+                loss_val, grads = jax.value_and_grad(loss_fn)(weights, train_x, train_y)
+                updates, new_opt_state = opt.update(grads, opt_state, weights)
+                new_weights = optax.apply_updates(weights, updates)
+                return new_weights, new_opt_state, loss_val
+
+        return opt, run_step
+
     def _run_eager_chunk(self, weights, opt, opt_state, train_data, y_train, steps: int):
         losses = []
         for _ in range(steps):
@@ -288,9 +315,6 @@ class PQCClassifier:
         else:
             weights = self.config.weight_init_scale * jax.random.normal(key, (self.x_layers, self.config.n_qubits))
 
-        opt = self.get_optimizer()
-        opt_state = opt.init(weights)
-
         train_data = self._as_jax_data(train_data)
         val_data = self._as_jax_data(val_data)
         y_train = jnp.asarray(y_train)
@@ -302,15 +326,21 @@ class PQCClassifier:
         
         history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
 
-        # Data unpacking logic handled inside loss/predict via 'train_data' tuple/array
-        
         eval_every = max(1, int(self.config.eval_every))
 
-        # Catalyst currently fails lowering loop-based AD for multi-input double circuits.
-        # We work around this by compiling fixed-size minibatch AD steps with Python-unrolled loss.
+        # Training mode selection:
+        #   catalyst_batch_size > 0 → Catalyst qjit minibatch AD (Python-unrolled, fixed size)
+        #   catalyst_batch_size = 0 → JAX jit full-batch AD (no MLIR unrolling, scales to ~10k)
         n_train = int(train_data[0].shape[0] if self.use_double_reuploading else train_data.shape[0])
-        batch_size = max(1, min(int(self.config.catalyst_batch_size), n_train))
-        step_fn = self._make_compiled_ad_step(batch_size)
+        use_fullbatch_jax = (self.config.catalyst_batch_size == 0)
+
+        if use_fullbatch_jax:
+            opt, step_fn = self._make_jax_fullbatch_step()
+        else:
+            opt = self.get_optimizer()
+            batch_size = max(1, min(int(self.config.catalyst_batch_size), n_train))
+            step_fn = self._make_compiled_ad_step(batch_size)
+        opt_state = opt.init(weights)
 
         chunk_iterator = range(0, self.config.n_epochs, eval_every)
         if self.config.show_progress:
@@ -322,57 +352,70 @@ class PQCClassifier:
 
             loss_values = []
             for _ in range(steps_this_chunk):
-                weighted_loss_sum = 0.0
-                seen = 0
-
-                for b_start in range(0, n_train, batch_size):
-                    b_end = min(n_train, b_start + batch_size)
-                    bs = b_end - b_start
-                    pad = batch_size - bs
-
-                    batch_mask = jnp.concatenate(
-                        [
-                            jnp.ones((bs,), dtype=weights.dtype),
-                            jnp.zeros((pad,), dtype=weights.dtype),
-                        ]
-                    )
-
+                if use_fullbatch_jax:
+                    # Full-batch: one step over the entire training set.
                     if self.use_double_reuploading:
                         train_x, train_f = train_data
-                        batch_x = train_x[b_start:b_end]
-                        batch_f = train_f[b_start:b_end]
-                        batch_y = y_train[b_start:b_end]
-                        if pad > 0:
-                            batch_x = jnp.pad(batch_x, ((0, pad), (0, 0)))
-                            batch_f = jnp.pad(batch_f, ((0, pad), (0, 0)))
-                            batch_y = jnp.pad(batch_y, ((0, pad),))
                         weights, opt_state, batch_loss = step_fn(
-                            weights,
-                            opt_state,
-                            batch_x,
-                            batch_f,
-                            batch_y,
-                            batch_mask,
+                            weights, opt_state, train_x, train_f, y_train
                         )
                     else:
-                        train_x = train_data
-                        batch_x = train_x[b_start:b_end]
-                        batch_y = y_train[b_start:b_end]
-                        if pad > 0:
-                            batch_x = jnp.pad(batch_x, ((0, pad), (0, 0)))
-                            batch_y = jnp.pad(batch_y, ((0, pad),))
                         weights, opt_state, batch_loss = step_fn(
-                            weights,
-                            opt_state,
-                            batch_x,
-                            batch_y,
-                            batch_mask,
+                            weights, opt_state, train_data, y_train
+                        )
+                    loss_values.append(float(batch_loss))
+                else:
+                    weighted_loss_sum = 0.0
+                    seen = 0
+
+                    for b_start in range(0, n_train, batch_size):
+                        b_end = min(n_train, b_start + batch_size)
+                        bs = b_end - b_start
+                        pad = batch_size - bs
+
+                        batch_mask = jnp.concatenate(
+                            [
+                                jnp.ones((bs,), dtype=weights.dtype),
+                                jnp.zeros((pad,), dtype=weights.dtype),
+                            ]
                         )
 
-                    weighted_loss_sum += float(batch_loss) * bs
-                    seen += bs
+                        if self.use_double_reuploading:
+                            train_x, train_f = train_data
+                            batch_x = train_x[b_start:b_end]
+                            batch_f = train_f[b_start:b_end]
+                            batch_y = y_train[b_start:b_end]
+                            if pad > 0:
+                                batch_x = jnp.pad(batch_x, ((0, pad), (0, 0)))
+                                batch_f = jnp.pad(batch_f, ((0, pad), (0, 0)))
+                                batch_y = jnp.pad(batch_y, ((0, pad),))
+                            weights, opt_state, batch_loss = step_fn(
+                                weights,
+                                opt_state,
+                                batch_x,
+                                batch_f,
+                                batch_y,
+                                batch_mask,
+                            )
+                        else:
+                            train_x = train_data
+                            batch_x = train_x[b_start:b_end]
+                            batch_y = y_train[b_start:b_end]
+                            if pad > 0:
+                                batch_x = jnp.pad(batch_x, ((0, pad), (0, 0)))
+                                batch_y = jnp.pad(batch_y, ((0, pad),))
+                            weights, opt_state, batch_loss = step_fn(
+                                weights,
+                                opt_state,
+                                batch_x,
+                                batch_y,
+                                batch_mask,
+                            )
 
-                loss_values.append(weighted_loss_sum / seen)
+                        weighted_loss_sum += float(batch_loss) * bs
+                        seen += bs
+
+                    loss_values.append(weighted_loss_sum / seen)
 
             history["train_loss"].extend(loss_values)
 

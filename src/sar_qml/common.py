@@ -51,7 +51,11 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
         "--catalyst-batch-size",
         type=int,
         default=64,
-        help="Catalyst AD minibatch size used inside qjit-compiled optimizer steps",
+        help=(
+            "AD minibatch size for Catalyst qjit-compiled optimizer steps. "
+            "Use 0 for full-batch JAX jit mode (scales to ~10k samples; "
+            "avoids Catalyst MLIR compile-time blow-up)."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
