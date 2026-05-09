@@ -7,6 +7,7 @@ install_requires = [
     "numpy",
     "scikit-learn",
     "pennylane",
+    "tqdm"
 ]
 
 info = {
