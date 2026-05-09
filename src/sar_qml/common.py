@@ -47,6 +47,12 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
         action="store_true",
         help="Enable tqdm progress bars (disabled by default for faster runs)",
     )
+    parser.add_argument(
+        "--catalyst-batch-size",
+        type=int,
+        default=64,
+        help="Catalyst AD minibatch size used inside qjit-compiled optimizer steps",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
     parser.add_argument(
@@ -86,6 +92,7 @@ def config_from_args(args: argparse.Namespace) -> PQCConfig:
         patience=args.patience,
         eval_every=args.eval_every,
         show_progress=args.show_progress,
+        catalyst_batch_size=args.catalyst_batch_size,
     )
 
 

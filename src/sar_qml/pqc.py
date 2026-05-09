@@ -1,9 +1,59 @@
 import pennylane as qml
-from pennylane import numpy as pp
 from dataclasses import dataclass
 from typing import Optional, Any, Dict
+import numpy as np
+import jax
+import jax.numpy as jnp
+import optax
+from catalyst import qjit, value_and_grad
 from tqdm import tqdm
 from sklearn.model_selection import KFold
+
+
+def _build_compiled_ad_step_double(qnode, opt, batch_size: int, epsilon: float, weight_decay: float):
+    def compiled_loss(weights, batch_x, batch_f, batch_y):
+        total_loss = jnp.asarray(0.0, dtype=weights.dtype)
+        for i in range(batch_size):
+            prob = (qnode(batch_x[i], batch_f[i], weights) + 1.0) / 2.0
+            prob = jnp.clip(prob, epsilon, 1.0 - epsilon)
+            total_loss = total_loss - (batch_y[i] * jnp.log(prob) + (1.0 - batch_y[i]) * jnp.log(1.0 - prob))
+
+        bce = total_loss / batch_size
+        if weight_decay > 0.0:
+            bce = bce + weight_decay * jnp.sum(weights ** 2)
+        return bce
+
+    @qjit
+    def run_step(weights, opt_state, batch_x, batch_f, batch_y):
+        loss_val, grads = value_and_grad(compiled_loss)(weights, batch_x, batch_f, batch_y)
+        updates, opt_state = opt.update(grads, opt_state, weights)
+        weights = optax.apply_updates(weights, updates)
+        return weights, opt_state, loss_val
+
+    return run_step
+
+
+def _build_compiled_ad_step_single(qnode, opt, batch_size: int, epsilon: float, weight_decay: float):
+    def compiled_loss(weights, batch_x, batch_y):
+        total_loss = jnp.asarray(0.0, dtype=weights.dtype)
+        for i in range(batch_size):
+            prob = (qnode(batch_x[i], weights) + 1.0) / 2.0
+            prob = jnp.clip(prob, epsilon, 1.0 - epsilon)
+            total_loss = total_loss - (batch_y[i] * jnp.log(prob) + (1.0 - batch_y[i]) * jnp.log(1.0 - prob))
+
+        bce = total_loss / batch_size
+        if weight_decay > 0.0:
+            bce = bce + weight_decay * jnp.sum(weights ** 2)
+        return bce
+
+    @qjit
+    def run_step(weights, opt_state, batch_x, batch_y):
+        loss_val, grads = value_and_grad(compiled_loss)(weights, batch_x, batch_y)
+        updates, opt_state = opt.update(grads, opt_state, weights)
+        weights = optax.apply_updates(weights, updates)
+        return weights, opt_state, loss_val
+
+    return run_step
 
 
 @dataclass
@@ -39,6 +89,7 @@ class PQCConfig:
     log_interval: int = 10
     eval_every: int = 5
     show_progress: bool = False
+    catalyst_batch_size: int = 64
 
 
 class PQCClassifier:
@@ -53,8 +104,8 @@ class PQCClassifier:
         self.dev = qml.device("lightning.qubit", wires=self.config.n_qubits)
 
         # We allow batching by not specifying input signature constraints strictly
-        self.qnode_single = qml.QNode(self._circuit_single, self.dev, diff_method="adjoint")    
-        self.qnode_double = qml.QNode(self._circuit_double, self.dev, diff_method="adjoint")
+        self.qnode_single = qml.QNode(self._circuit_single, self.dev, interface="jax", diff_method="adjoint")
+        self.qnode_double = qml.QNode(self._circuit_double, self.dev, interface="jax", diff_method="adjoint")
 
         self.training_history: Dict[str, Any] = {}
 
@@ -130,7 +181,7 @@ class PQCClassifier:
             res = self.qnode_single(X, weights)
         
         # Ensure result is a proper array
-        res = pp.array(res) 
+        res = jnp.asarray(res)
         
         # Map expectation [-1, 1] to probability [0, 1]
         return (res + 1) / 2
@@ -140,12 +191,12 @@ class PQCClassifier:
         probs = self.predict(X, weights)
         
         # Numerical stability clip
-        probs = pp.clip(probs, self.config.epsilon, 1 - self.config.epsilon)
+        probs = jnp.clip(probs, self.config.epsilon, 1 - self.config.epsilon)
         
-        bce = -pp.mean(y * pp.log(probs) + (1 - y) * pp.log(1 - probs))
+        bce = -jnp.mean(y * jnp.log(probs) + (1 - y) * jnp.log(1 - probs))
 
         if self.config.weight_decay > 0.0:
-            l2 = pp.sum(weights ** 2)
+            l2 = jnp.sum(weights ** 2)
             return bce + self.config.weight_decay * l2
         return bce
 
@@ -153,47 +204,93 @@ class PQCClassifier:
         probs = self.predict(X, weights)
         preds = (probs > 0.5).astype(int)
         # y may be soft labels (float in [0,1]); threshold at 0.5 to get hard targets.
-        y_hard = (pp.array(y) > 0.5).astype(int)
-        return float(pp.mean(preds == y_hard))
+        y_hard = (jnp.asarray(y) > 0.5).astype(int)
+        return float(jnp.mean(preds == y_hard))
 
     # ------------------------------
     # Helpers
     # ------------------------------
     def init_weights(self):
+        key = jax.random.PRNGKey(self.config.random_state)
         if self.use_double_reuploading:
             # Flat 1D: [x_layers * n_qubits] x-weights then [f_layers * n_qubits] f-weights.
             n_params = (self.x_layers + self.f_layers) * self.config.n_qubits
-            return pp.array(
-                self.config.weight_init_scale * pp.random.randn(n_params),
-                requires_grad=True,
-            )
+            return self.config.weight_init_scale * jax.random.normal(key, (n_params,))
         else:
             shape = (self.x_layers, self.config.n_qubits)
-            return pp.array(
-                self.config.weight_init_scale * pp.random.randn(*shape),
-                requires_grad=True,
-            )
+            return self.config.weight_init_scale * jax.random.normal(key, shape)
 
     def get_optimizer(self):
         if self.config.optimizer.lower() == "adam":
-            return qml.AdamOptimizer(
-                stepsize=self.config.learning_rate,
-                beta1=self.config.adam_beta1,
-                beta2=self.config.adam_beta2,
+            return optax.adam(
+                self.config.learning_rate,
+                b1=self.config.adam_beta1,
+                b2=self.config.adam_beta2,
                 eps=self.config.adam_eps,
             )
 
-        return qml.GradientDescentOptimizer(stepsize=self.config.learning_rate)
+        return optax.sgd(self.config.learning_rate)
+
+    def _as_jax_data(self, data):
+        if self.use_double_reuploading:
+            x_data, f_data = data
+            return jnp.asarray(x_data), jnp.asarray(f_data)
+        return jnp.asarray(data)
+
+    def _make_compiled_ad_step(self, batch_size: int):
+        if batch_size <= 0:
+            return None
+
+        opt = self.get_optimizer()
+        epsilon = float(self.config.epsilon)
+        weight_decay = float(self.config.weight_decay)
+
+        if self.use_double_reuploading:
+            return _build_compiled_ad_step_double(
+                self.qnode_double,
+                opt,
+                batch_size,
+                epsilon,
+                weight_decay,
+            )
+
+        return _build_compiled_ad_step_single(
+            self.qnode_single,
+            opt,
+            batch_size,
+            epsilon,
+            weight_decay,
+        )
+
+    def _run_eager_chunk(self, weights, opt, opt_state, train_data, y_train, steps: int):
+        losses = []
+        for _ in range(steps):
+            loss_val, grads = jax.value_and_grad(self.loss)(weights, train_data, y_train)
+            updates, opt_state = opt.update(grads, opt_state, weights)
+            weights = optax.apply_updates(weights, updates)
+            losses.append(float(loss_val))
+        return weights, opt_state, losses
 
     # ------------------------------
     # Training
     # ------------------------------
     def train_fold(self, train_data, y_train, val_data, y_val, fold_num):
         # Deterministic seed per fold
-        pp.random.seed(self.config.random_state + fold_num)
+        fold_seed = self.config.random_state + fold_num
+        key = jax.random.PRNGKey(fold_seed)
+        if self.use_double_reuploading:
+            n_params = (self.x_layers + self.f_layers) * self.config.n_qubits
+            weights = self.config.weight_init_scale * jax.random.normal(key, (n_params,))
+        else:
+            weights = self.config.weight_init_scale * jax.random.normal(key, (self.x_layers, self.config.n_qubits))
 
-        weights = self.init_weights()
         opt = self.get_optimizer()
+        opt_state = opt.init(weights)
+
+        train_data = self._as_jax_data(train_data)
+        val_data = self._as_jax_data(val_data)
+        y_train = jnp.asarray(y_train)
+        y_val = jnp.asarray(y_val)
 
         best_val_acc = -1.0
         best_weights = weights
@@ -204,43 +301,79 @@ class PQCClassifier:
         # Data unpacking logic handled inside loss/predict via 'train_data' tuple/array
         
         eval_every = max(1, int(self.config.eval_every))
-        epoch_iterator = range(self.config.n_epochs)
+
+        # Catalyst currently fails lowering loop-based AD for multi-input double circuits.
+        # We work around this by compiling fixed-size minibatch AD steps with Python-unrolled loss.
+        n_train = int(train_data[0].shape[0] if self.use_double_reuploading else train_data.shape[0])
+        batch_size = max(1, min(int(self.config.catalyst_batch_size), n_train))
+        step_cache: Dict[int, Any] = {}
+
+        def get_step_fn(bs: int):
+            if bs not in step_cache:
+                step_cache[bs] = self._make_compiled_ad_step(bs)
+            return step_cache[bs]
+
+        chunk_iterator = range(0, self.config.n_epochs, eval_every)
         if self.config.show_progress:
-            epoch_iterator = tqdm(epoch_iterator, desc=f"Fold {fold_num}", leave=False)
+            chunk_iterator = tqdm(chunk_iterator, desc=f"Fold {fold_num}", leave=False)
 
-        for epoch in epoch_iterator:
-            
-            # Optimization step
-            # Note: We pass the *entire* train_data batch here
-            weights, loss_val = opt.step_and_cost(lambda w: self.loss(w, train_data, y_train), weights)
+        for chunk_start in chunk_iterator:
+            remaining = self.config.n_epochs - chunk_start
+            steps_this_chunk = min(eval_every, remaining)
 
-            history["train_loss"].append(float(loss_val))
+            loss_values = []
+            for _ in range(steps_this_chunk):
+                weighted_loss_sum = 0.0
+                seen = 0
 
-            should_eval = ((epoch + 1) % eval_every == 0) or (epoch == self.config.n_epochs - 1)
-            if should_eval:
-                train_acc = self.accuracy(weights, train_data, y_train)
-                val_loss = self.loss(weights, val_data, y_val)
-                val_acc = self.accuracy(weights, val_data, y_val)
+                for b_start in range(0, n_train, batch_size):
+                    b_end = min(n_train, b_start + batch_size)
+                    bs = b_end - b_start
+                    step_fn = get_step_fn(bs)
 
-                history["val_loss"].append(float(val_loss))
-                history["train_acc"].append(train_acc)
-                history["val_acc"].append(val_acc)
+                    if self.use_double_reuploading:
+                        train_x, train_f = train_data
+                        batch_x = train_x[b_start:b_end]
+                        batch_f = train_f[b_start:b_end]
+                        batch_y = y_train[b_start:b_end]
+                        weights, opt_state, batch_loss = step_fn(weights, opt_state, batch_x, batch_f, batch_y)
+                    else:
+                        train_x = train_data
+                        batch_x = train_x[b_start:b_end]
+                        batch_y = y_train[b_start:b_end]
+                        weights, opt_state, batch_loss = step_fn(weights, opt_state, batch_x, batch_y)
 
-                if self.config.show_progress:
-                    epoch_iterator.set_postfix({"t_loss": f"{loss_val:.3f}", "v_acc": f"{val_acc:.3f}"})
+                    weighted_loss_sum += float(batch_loss) * bs
+                    seen += bs
 
-                # Early stopping is checked on evaluated epochs only.
-                if val_acc > best_val_acc + self.config.min_improvement:
-                    best_val_acc = val_acc
-                    best_weights = pp.array(weights, requires_grad=False)
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
+                loss_values.append(weighted_loss_sum / seen)
+
+            history["train_loss"].extend(loss_values)
+
+            if steps_this_chunk > 1:
+                history["val_loss"].extend([float("nan")] * (steps_this_chunk - 1))
+                history["train_acc"].extend([float("nan")] * (steps_this_chunk - 1))
+                history["val_acc"].extend([float("nan")] * (steps_this_chunk - 1))
+
+            train_acc = self.accuracy(weights, train_data, y_train)
+            val_loss = self.loss(weights, val_data, y_val)
+            val_acc = self.accuracy(weights, val_data, y_val)
+
+            history["val_loss"].append(float(val_loss))
+            history["train_acc"].append(train_acc)
+            history["val_acc"].append(val_acc)
+
+            last_loss = loss_values[-1]
+            if self.config.show_progress:
+                chunk_iterator.set_postfix({"t_loss": f"{last_loss:.3f}", "v_acc": f"{val_acc:.3f}"})
+
+            if val_acc > best_val_acc + self.config.min_improvement:
+                best_val_acc = val_acc
+                best_weights = jnp.array(weights)
+                patience_counter = 0
             else:
-                history["val_loss"].append(float("nan"))
-                history["train_acc"].append(float("nan"))
-                history["val_acc"].append(float("nan"))
-            
+                patience_counter += 1
+
             if patience_counter >= self.config.patience:
                 break
         
@@ -281,5 +414,5 @@ class PQCClassifier:
             print(f"Fold {fold} finished. Best Val Acc: {final_acc:.4f}")
 
         accs = [r['final_acc'] for r in fold_results]
-        print(f"\nResult: {pp.mean(accs):.4f} ± {pp.std(accs):.4f}")
+        print(f"\nResult: {jnp.mean(jnp.asarray(accs)):.4f} ± {jnp.std(jnp.asarray(accs)):.4f}")
         return fold_results

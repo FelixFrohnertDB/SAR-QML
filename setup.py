@@ -7,6 +7,9 @@ install_requires = [
     "numpy",
     "scikit-learn",
     "pennylane",
+    "jax",
+    "optax",
+    "pennylane-catalyst",
     "tqdm"
 ]
 
