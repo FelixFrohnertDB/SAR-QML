@@ -1,0 +1,33 @@
+#!/bin/bash
+#SBATCH --job-name=train-graph
+#SBATCH --output=./%x.out
+#SBATCH --error=./%x.err
+#SBATCH --time=0-1:00:00
+#SBATCH --mem=8GB
+#SBATCH --partition=cpu-short
+#SBATCH --mail-type=NONE
+
+set -euo pipefail
+
+cd ..
+
+ml purge
+ml load ALICE/default
+ml load Python/3.10.13-GCCcore-11.3.0
+source /home/frohnertf/data1/githubRepos/ElectronGraph/.venv/bin/activate
+
+# ── Experiment configuration ──────────────────────────────────────────────────
+
+ARGS=(
+    --n-samples 1000 
+    --run-name "e1" 
+    --show-progress  
+    --n-layers 10  
+    --n-epochs 500 
+    --n-folds 5
+
+)
+
+echo "Command: python -u experiments/exp2_mnudft_linearity.py ${ARGS[*]}"
+
+python -u experiments/exp2_mnudft_linearity.py "${ARGS[@]}"
