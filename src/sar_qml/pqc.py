@@ -11,21 +11,23 @@ from sklearn.model_selection import KFold
 
 
 def _build_compiled_ad_step_double(qnode, opt, batch_size: int, epsilon: float, weight_decay: float):
-    def compiled_loss(weights, batch_x, batch_f, batch_y):
+    def compiled_loss(weights, batch_x, batch_f, batch_y, batch_mask):
         total_loss = jnp.asarray(0.0, dtype=weights.dtype)
         for i in range(batch_size):
             prob = (qnode(batch_x[i], batch_f[i], weights) + 1.0) / 2.0
             prob = jnp.clip(prob, epsilon, 1.0 - epsilon)
-            total_loss = total_loss - (batch_y[i] * jnp.log(prob) + (1.0 - batch_y[i]) * jnp.log(1.0 - prob))
+            sample_loss = -(batch_y[i] * jnp.log(prob) + (1.0 - batch_y[i]) * jnp.log(1.0 - prob))
+            total_loss = total_loss + batch_mask[i] * sample_loss
 
-        bce = total_loss / batch_size
+        denom = jnp.maximum(jnp.sum(batch_mask), jnp.asarray(1.0, dtype=weights.dtype))
+        bce = total_loss / denom
         if weight_decay > 0.0:
             bce = bce + weight_decay * jnp.sum(weights ** 2)
         return bce
 
     @qjit
-    def run_step(weights, opt_state, batch_x, batch_f, batch_y):
-        loss_val, grads = value_and_grad(compiled_loss)(weights, batch_x, batch_f, batch_y)
+    def run_step(weights, opt_state, batch_x, batch_f, batch_y, batch_mask):
+        loss_val, grads = value_and_grad(compiled_loss)(weights, batch_x, batch_f, batch_y, batch_mask)
         updates, opt_state = opt.update(grads, opt_state, weights)
         weights = optax.apply_updates(weights, updates)
         return weights, opt_state, loss_val
@@ -34,21 +36,23 @@ def _build_compiled_ad_step_double(qnode, opt, batch_size: int, epsilon: float, 
 
 
 def _build_compiled_ad_step_single(qnode, opt, batch_size: int, epsilon: float, weight_decay: float):
-    def compiled_loss(weights, batch_x, batch_y):
+    def compiled_loss(weights, batch_x, batch_y, batch_mask):
         total_loss = jnp.asarray(0.0, dtype=weights.dtype)
         for i in range(batch_size):
             prob = (qnode(batch_x[i], weights) + 1.0) / 2.0
             prob = jnp.clip(prob, epsilon, 1.0 - epsilon)
-            total_loss = total_loss - (batch_y[i] * jnp.log(prob) + (1.0 - batch_y[i]) * jnp.log(1.0 - prob))
+            sample_loss = -(batch_y[i] * jnp.log(prob) + (1.0 - batch_y[i]) * jnp.log(1.0 - prob))
+            total_loss = total_loss + batch_mask[i] * sample_loss
 
-        bce = total_loss / batch_size
+        denom = jnp.maximum(jnp.sum(batch_mask), jnp.asarray(1.0, dtype=weights.dtype))
+        bce = total_loss / denom
         if weight_decay > 0.0:
             bce = bce + weight_decay * jnp.sum(weights ** 2)
         return bce
 
     @qjit
-    def run_step(weights, opt_state, batch_x, batch_y):
-        loss_val, grads = value_and_grad(compiled_loss)(weights, batch_x, batch_y)
+    def run_step(weights, opt_state, batch_x, batch_y, batch_mask):
+        loss_val, grads = value_and_grad(compiled_loss)(weights, batch_x, batch_y, batch_mask)
         updates, opt_state = opt.update(grads, opt_state, weights)
         weights = optax.apply_updates(weights, updates)
         return weights, opt_state, loss_val
@@ -306,12 +310,7 @@ class PQCClassifier:
         # We work around this by compiling fixed-size minibatch AD steps with Python-unrolled loss.
         n_train = int(train_data[0].shape[0] if self.use_double_reuploading else train_data.shape[0])
         batch_size = max(1, min(int(self.config.catalyst_batch_size), n_train))
-        step_cache: Dict[int, Any] = {}
-
-        def get_step_fn(bs: int):
-            if bs not in step_cache:
-                step_cache[bs] = self._make_compiled_ad_step(bs)
-            return step_cache[bs]
+        step_fn = self._make_compiled_ad_step(batch_size)
 
         chunk_iterator = range(0, self.config.n_epochs, eval_every)
         if self.config.show_progress:
@@ -329,19 +328,46 @@ class PQCClassifier:
                 for b_start in range(0, n_train, batch_size):
                     b_end = min(n_train, b_start + batch_size)
                     bs = b_end - b_start
-                    step_fn = get_step_fn(bs)
+                    pad = batch_size - bs
+
+                    batch_mask = jnp.concatenate(
+                        [
+                            jnp.ones((bs,), dtype=weights.dtype),
+                            jnp.zeros((pad,), dtype=weights.dtype),
+                        ]
+                    )
 
                     if self.use_double_reuploading:
                         train_x, train_f = train_data
                         batch_x = train_x[b_start:b_end]
                         batch_f = train_f[b_start:b_end]
                         batch_y = y_train[b_start:b_end]
-                        weights, opt_state, batch_loss = step_fn(weights, opt_state, batch_x, batch_f, batch_y)
+                        if pad > 0:
+                            batch_x = jnp.pad(batch_x, ((0, pad), (0, 0)))
+                            batch_f = jnp.pad(batch_f, ((0, pad), (0, 0)))
+                            batch_y = jnp.pad(batch_y, ((0, pad),))
+                        weights, opt_state, batch_loss = step_fn(
+                            weights,
+                            opt_state,
+                            batch_x,
+                            batch_f,
+                            batch_y,
+                            batch_mask,
+                        )
                     else:
                         train_x = train_data
                         batch_x = train_x[b_start:b_end]
                         batch_y = y_train[b_start:b_end]
-                        weights, opt_state, batch_loss = step_fn(weights, opt_state, batch_x, batch_y)
+                        if pad > 0:
+                            batch_x = jnp.pad(batch_x, ((0, pad), (0, 0)))
+                            batch_y = jnp.pad(batch_y, ((0, pad),))
+                        weights, opt_state, batch_loss = step_fn(
+                            weights,
+                            opt_state,
+                            batch_x,
+                            batch_y,
+                            batch_mask,
+                        )
 
                     weighted_loss_sum += float(batch_loss) * bs
                     seen += bs
