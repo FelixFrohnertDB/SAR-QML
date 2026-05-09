@@ -529,6 +529,61 @@ def run_crossval(
     }
 
 
+def run_crossval_single_fold(
+    config: PQCConfig,
+    x_data: np.ndarray,
+    y: np.ndarray,
+    fold_index: int,
+    f_data: Optional[np.ndarray] = None,
+    use_double_reuploading: bool = False,
+) -> Dict[str, Any]:
+    """Run exactly one StratifiedKFold split (1-based fold_index)."""
+    if fold_index < 1 or fold_index > config.n_folds:
+        raise ValueError(f"fold_index must be in [1, {config.n_folds}], got {fold_index}")
+
+    y_strat = (np.asarray(y) > 0.5).astype(int)
+    kf = StratifiedKFold(n_splits=config.n_folds, shuffle=True, random_state=config.random_state)
+    splits = list(kf.split(x_data, y_strat))
+    train_idx, val_idx = splits[fold_index - 1]
+
+    y_train = y[train_idx]
+    y_val = y[val_idx]
+
+    if use_double_reuploading:
+        assert f_data is not None
+        train_payload = (pp.array(x_data[train_idx]), pp.array(f_data[train_idx]))
+        val_payload = (pp.array(x_data[val_idx]), pp.array(f_data[val_idx]))
+    else:
+        train_payload = pp.array(x_data[train_idx])
+        val_payload = pp.array(x_data[val_idx])
+
+    best_w, history, best_val_acc = _train_single_fold(
+        config,
+        use_double_reuploading,
+        train_payload,
+        y_train,
+        val_payload,
+        y_val,
+        fold_index,
+    )
+
+    fold_metric = {
+        "fold": fold_index,
+        "best_val_acc": best_val_acc,
+        "history": history,
+        "n_train": int(len(train_idx)),
+        "n_val": int(len(val_idx)),
+    }
+
+    return {
+        "mean_best_val_acc": float(best_val_acc),
+        "std_best_val_acc": 0.0,
+        "fold_metrics": [fold_metric],
+        "fold_weights": [best_w],
+        "selected_fold": int(fold_index),
+    }
+
+
 def run_paired_models(
     config: PQCConfig,
     x_data: np.ndarray,
@@ -568,6 +623,50 @@ def run_paired_models(
             "aligned_f_depth": f_depth,
             "standard_n_layers": standard_n_layers,
             "standard_input": "x_only",
+        },
+    }
+
+
+def run_paired_models_single_fold(
+    config: PQCConfig,
+    x_data: np.ndarray,
+    f_data: np.ndarray,
+    y: np.ndarray,
+    fold_index: int,
+) -> Dict[str, Any]:
+    """Run aligned/standard comparison on one fixed fold only."""
+    from dataclasses import replace as dc_replace
+
+    x_depth = config.n_x_layers if config.n_x_layers is not None else config.n_layers
+    f_depth = config.n_f_layers if config.n_f_layers is not None else config.n_layers
+    standard_n_layers = x_depth + f_depth
+    standard_config = dc_replace(config, n_layers=standard_n_layers, n_x_layers=None, n_f_layers=None)
+
+    aligned = run_crossval_single_fold(
+        config=config,
+        x_data=x_data,
+        f_data=f_data,
+        y=y,
+        fold_index=fold_index,
+        use_double_reuploading=True,
+    )
+    standard = run_crossval_single_fold(
+        config=standard_config,
+        x_data=x_data,
+        f_data=None,
+        y=y,
+        fold_index=fold_index,
+        use_double_reuploading=False,
+    )
+    return {
+        "aligned": aligned,
+        "standard": standard,
+        "_depth_info": {
+            "aligned_x_depth": x_depth,
+            "aligned_f_depth": f_depth,
+            "standard_n_layers": standard_n_layers,
+            "standard_input": "x_only",
+            "selected_fold": int(fold_index),
         },
     }
 
