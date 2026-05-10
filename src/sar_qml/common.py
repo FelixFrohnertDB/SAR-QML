@@ -59,6 +59,8 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--readout-mode",
+        "--readout_mode",
+        dest="readout_mode",
         type=str,
         default="single",
         choices=["single", "linear"],
@@ -69,6 +71,8 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--readout-wires",
+        "--readout_wires",
+        dest="readout_wires",
         type=int,
         default=None,
         help=(
