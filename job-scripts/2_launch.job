@@ -31,8 +31,8 @@ ARGS=(
     --n-epochs 500 
     --n-folds 5
     --fold-index "${SLURM_ARRAY_TASK_ID}"
-    --readout_mode linear
-    --learning_rate 0.005
+    --readout-mode linear
+    --lr 0.005
     --catalyst-batch-size 128
 
 )

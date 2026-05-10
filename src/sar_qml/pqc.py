@@ -30,8 +30,7 @@ def _build_compiled_ad_step_double(
 
         for i in range(batch_size):
             if use_linear_readout:
-                readout_vec = qnode(batch_x[i], batch_f[i], quantum_weights)
-                logit = jnp.dot(readout_w, readout_vec) + readout_b
+                logit = qnode(batch_x[i], batch_f[i], quantum_weights, readout_w) + readout_b
                 prob = jax.nn.sigmoid(logit)
             else:
                 prob = (qnode(batch_x[i], batch_f[i], weights) + 1.0) / 2.0
@@ -77,8 +76,7 @@ def _build_compiled_ad_step_single(
 
         for i in range(batch_size):
             if use_linear_readout:
-                readout_vec = qnode(batch_x[i], quantum_weights)
-                logit = jnp.dot(readout_w, readout_vec) + readout_b
+                logit = qnode(batch_x[i], quantum_weights, readout_w) + readout_b
                 prob = jax.nn.sigmoid(logit)
             else:
                 prob = (qnode(batch_x[i], weights) + 1.0) / 2.0
@@ -187,6 +185,10 @@ class PQCClassifier:
 
         return q_weights, readout_w, readout_b
 
+    def _linear_readout_observable(self, readout_w):
+        observables = [qml.PauliZ(i) for i in range(self.readout_dim)]
+        return qml.Hamiltonian(readout_w, observables)
+
     # ------------------------------
     # Circuit components
     # ------------------------------
@@ -213,7 +215,7 @@ class PQCClassifier:
     # ------------------------------
     # Circuits (Vectorized)
     # ------------------------------
-    def _circuit_single(self, inputs, weights):
+    def _circuit_single(self, inputs, weights, readout_w=None):
         """
         inputs: shape (batch_size, n_qubits)
         weights: shape (n_layers, n_qubits)
@@ -222,10 +224,12 @@ class PQCClassifier:
             self.angle_encoding(inputs)
             self.variational_layer(weights[l])
         if self.use_linear_readout:
+            if readout_w is not None:
+                return qml.expval(self._linear_readout_observable(readout_w))
             return [qml.expval(qml.PauliZ(i)) for i in range(self.readout_dim)]
         return qml.expval(qml.PauliZ(0))
 
-    def _circuit_double(self, inputs_x, inputs_f, weights):
+    def _circuit_double(self, inputs_x, inputs_f, weights, readout_w=None):
         """
         inputs_x: shape (batch_size, n_qubits)
         inputs_f: shape (batch_size, n_qubits)
@@ -244,6 +248,8 @@ class PQCClassifier:
                 self.angle_encoding(inputs_f)
                 self.variational_layer(wf[l])
         if self.use_linear_readout:
+            if readout_w is not None:
+                return qml.expval(self._linear_readout_observable(readout_w))
             return [qml.expval(qml.PauliZ(i)) for i in range(self.readout_dim)]
         return qml.expval(qml.PauliZ(0))
 
