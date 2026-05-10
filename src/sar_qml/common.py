@@ -57,6 +57,25 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
             "avoids Catalyst MLIR compile-time blow-up)."
         ),
     )
+    parser.add_argument(
+        "--readout-mode",
+        type=str,
+        default="single",
+        choices=["single", "linear"],
+        help=(
+            "Readout head type: 'single' keeps the original single-observable output; "
+            "'linear' uses multiple Z expectations with a trainable linear logit."
+        ),
+    )
+    parser.add_argument(
+        "--readout-wires",
+        type=int,
+        default=None,
+        help=(
+            "Number of Pauli-Z observables for linear readout. "
+            "Ignored when --readout-mode=single; defaults to all qubits in linear mode."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
     parser.add_argument(
@@ -97,6 +116,8 @@ def config_from_args(args: argparse.Namespace) -> PQCConfig:
         eval_every=args.eval_every,
         show_progress=args.show_progress,
         catalyst_batch_size=args.catalyst_batch_size,
+        readout_mode=args.readout_mode,
+        readout_wires=args.readout_wires,
     )
 
 

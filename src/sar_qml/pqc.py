@@ -1,6 +1,6 @@
 import pennylane as qml
 from dataclasses import dataclass
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Tuple
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -10,11 +10,31 @@ from tqdm import tqdm
 from sklearn.model_selection import KFold
 
 
-def _build_compiled_ad_step_double(qnode, opt, batch_size: int, epsilon: float, weight_decay: float):
+def _build_compiled_ad_step_double(
+    qnode,
+    opt,
+    batch_size: int,
+    epsilon: float,
+    weight_decay: float,
+    use_linear_readout: bool,
+    quantum_param_size: int,
+    readout_dim: int,
+):
     def compiled_loss(weights, batch_x, batch_f, batch_y, batch_mask):
         total_loss = jnp.asarray(0.0, dtype=weights.dtype)
+
+        if use_linear_readout:
+            quantum_weights = weights[:quantum_param_size]
+            readout_w = weights[quantum_param_size : quantum_param_size + readout_dim]
+            readout_b = weights[quantum_param_size + readout_dim]
+
         for i in range(batch_size):
-            prob = (qnode(batch_x[i], batch_f[i], weights) + 1.0) / 2.0
+            if use_linear_readout:
+                readout_vec = jnp.asarray(qnode(batch_x[i], batch_f[i], quantum_weights))
+                logit = jnp.dot(readout_vec, readout_w) + readout_b
+                prob = jax.nn.sigmoid(logit)
+            else:
+                prob = (qnode(batch_x[i], batch_f[i], weights) + 1.0) / 2.0
             prob = jnp.clip(prob, epsilon, 1.0 - epsilon)
             sample_loss = -(batch_y[i] * jnp.log(prob) + (1.0 - batch_y[i]) * jnp.log(1.0 - prob))
             total_loss = total_loss + batch_mask[i] * sample_loss
@@ -35,11 +55,33 @@ def _build_compiled_ad_step_double(qnode, opt, batch_size: int, epsilon: float, 
     return run_step
 
 
-def _build_compiled_ad_step_single(qnode, opt, batch_size: int, epsilon: float, weight_decay: float):
+def _build_compiled_ad_step_single(
+    qnode,
+    opt,
+    batch_size: int,
+    epsilon: float,
+    weight_decay: float,
+    use_linear_readout: bool,
+    quantum_param_size: int,
+    readout_dim: int,
+    single_quantum_shape: Tuple[int, int],
+):
     def compiled_loss(weights, batch_x, batch_y, batch_mask):
         total_loss = jnp.asarray(0.0, dtype=weights.dtype)
+
+        if use_linear_readout:
+            quantum_weights_flat = weights[:quantum_param_size]
+            quantum_weights = quantum_weights_flat.reshape(single_quantum_shape)
+            readout_w = weights[quantum_param_size : quantum_param_size + readout_dim]
+            readout_b = weights[quantum_param_size + readout_dim]
+
         for i in range(batch_size):
-            prob = (qnode(batch_x[i], weights) + 1.0) / 2.0
+            if use_linear_readout:
+                readout_vec = jnp.asarray(qnode(batch_x[i], quantum_weights))
+                logit = jnp.dot(readout_vec, readout_w) + readout_b
+                prob = jax.nn.sigmoid(logit)
+            else:
+                prob = (qnode(batch_x[i], weights) + 1.0) / 2.0
             prob = jnp.clip(prob, epsilon, 1.0 - epsilon)
             sample_loss = -(batch_y[i] * jnp.log(prob) + (1.0 - batch_y[i]) * jnp.log(1.0 - prob))
             total_loss = total_loss + batch_mask[i] * sample_loss
@@ -94,15 +136,22 @@ class PQCConfig:
     eval_every: int = 5
     show_progress: bool = False
     catalyst_batch_size: int = 64
+    readout_mode: str = "single"
+    readout_wires: Optional[int] = None
 
 
 class PQCClassifier:
     def __init__(self, config: PQCConfig, use_double_reuploading: bool = False):
         self.config = config
         self.use_double_reuploading = use_double_reuploading
+        self.readout_mode = self.config.readout_mode.lower()
+        if self.readout_mode not in {"single", "linear"}:
+            raise ValueError("readout_mode must be 'single' or 'linear'")
+        self.use_linear_readout = self.readout_mode == "linear"
         self.x_layers = self.config.n_x_layers if self.config.n_x_layers is not None else self.config.n_layers
         self.f_layers = self.config.n_f_layers if self.config.n_f_layers is not None else self.config.n_layers
         self.max_double_layers = max(self.x_layers, self.f_layers)
+        self.readout_dim = self._get_readout_dim()
 
         # Device: "adjoint" is preferred for lightning.qubit
         self.dev = qml.device("lightning.qubit", wires=self.config.n_qubits)
@@ -112,6 +161,31 @@ class PQCClassifier:
         self.qnode_double = qml.QNode(self._circuit_double, self.dev, interface="jax", diff_method="adjoint")
 
         self.training_history: Dict[str, Any] = {}
+
+    def _get_readout_dim(self) -> int:
+        if not self.use_linear_readout:
+            return 1
+        requested = self.config.readout_wires if self.config.readout_wires is not None else self.config.n_qubits
+        return max(1, min(int(requested), self.config.n_qubits))
+
+    def _quantum_param_size(self) -> int:
+        if self.use_double_reuploading:
+            return (self.x_layers + self.f_layers) * self.config.n_qubits
+        return self.x_layers * self.config.n_qubits
+
+    def _split_joint_weights(self, weights):
+        if not self.use_linear_readout:
+            return weights, None, None
+
+        q_size = self._quantum_param_size()
+        q_weights = weights[:q_size]
+        readout_w = weights[q_size : q_size + self.readout_dim]
+        readout_b = weights[q_size + self.readout_dim]
+
+        if not self.use_double_reuploading:
+            q_weights = q_weights.reshape(self.x_layers, self.config.n_qubits)
+
+        return q_weights, readout_w, readout_b
 
     # ------------------------------
     # Circuit components
@@ -147,6 +221,8 @@ class PQCClassifier:
         for l in range(self.x_layers):
             self.angle_encoding(inputs)
             self.variational_layer(weights[l])
+        if self.use_linear_readout:
+            return [qml.expval(qml.PauliZ(i)) for i in range(self.readout_dim)]
         return qml.expval(qml.PauliZ(0))
 
     def _circuit_double(self, inputs_x, inputs_f, weights):
@@ -167,6 +243,8 @@ class PQCClassifier:
             if l < self.f_layers:
                 self.angle_encoding(inputs_f)
                 self.variational_layer(wf[l])
+        if self.use_linear_readout:
+            return [qml.expval(qml.PauliZ(i)) for i in range(self.readout_dim)]
         return qml.expval(qml.PauliZ(0))
 
     # ------------------------------
@@ -176,6 +254,36 @@ class PQCClassifier:
         """
         Predicts for the whole batch X at once using broadcasting.
         """
+        if self.use_linear_readout:
+            q_weights, readout_w, readout_b = self._split_joint_weights(weights)
+            if self.use_double_reuploading:
+                X_data, F_data = X
+                res = self.qnode_double(X_data, F_data, q_weights)
+            else:
+                res = self.qnode_single(X, q_weights)
+
+            features = jnp.asarray(res)
+            if features.ndim == 1:
+                if self.readout_dim == 1:
+                    logits = features * readout_w[0] + readout_b
+                else:
+                    logits = jnp.dot(features, readout_w) + readout_b
+            elif features.ndim == 2:
+                # PennyLane may return either (batch, dim) or (dim, batch).
+                if features.shape[-1] == self.readout_dim:
+                    feature_matrix = features
+                elif features.shape[0] == self.readout_dim:
+                    feature_matrix = jnp.swapaxes(features, 0, 1)
+                else:
+                    raise ValueError(
+                        f"Unexpected linear readout feature shape {features.shape} for dim={self.readout_dim}"
+                    )
+                logits = feature_matrix @ readout_w + readout_b
+            else:
+                raise ValueError(f"Unexpected linear readout rank: {features.ndim}")
+
+            return jax.nn.sigmoid(logits)
+
         if self.use_double_reuploading:
             X_data, F_data = X
             # Pass full batch directly
@@ -183,10 +291,10 @@ class PQCClassifier:
         else:
             # Pass full batch directly
             res = self.qnode_single(X, weights)
-        
+
         # Ensure result is a proper array
         res = jnp.asarray(res)
-        
+
         # Map expectation [-1, 1] to probability [0, 1]
         return (res + 1) / 2
 
@@ -216,6 +324,13 @@ class PQCClassifier:
     # ------------------------------
     def init_weights(self):
         key = jax.random.PRNGKey(self.config.random_state)
+        return self._init_weights_for_key(key)
+
+    def _init_weights_for_key(self, key):
+        if self.use_linear_readout:
+            n_params = self._quantum_param_size() + self.readout_dim + 1
+            return self.config.weight_init_scale * jax.random.normal(key, (n_params,))
+
         if self.use_double_reuploading:
             # Flat 1D: [x_layers * n_qubits] x-weights then [f_layers * n_qubits] f-weights.
             n_params = (self.x_layers + self.f_layers) * self.config.n_qubits
@@ -256,6 +371,9 @@ class PQCClassifier:
                 batch_size,
                 epsilon,
                 weight_decay,
+                self.use_linear_readout,
+                self._quantum_param_size(),
+                self.readout_dim,
             )
 
         return _build_compiled_ad_step_single(
@@ -264,6 +382,10 @@ class PQCClassifier:
             batch_size,
             epsilon,
             weight_decay,
+            self.use_linear_readout,
+            self._quantum_param_size(),
+            self.readout_dim,
+            (self.x_layers, self.config.n_qubits),
         )
 
     def _make_jax_fullbatch_step(self):
@@ -309,11 +431,7 @@ class PQCClassifier:
         # Deterministic seed per fold
         fold_seed = self.config.random_state + fold_num
         key = jax.random.PRNGKey(fold_seed)
-        if self.use_double_reuploading:
-            n_params = (self.x_layers + self.f_layers) * self.config.n_qubits
-            weights = self.config.weight_init_scale * jax.random.normal(key, (n_params,))
-        else:
-            weights = self.config.weight_init_scale * jax.random.normal(key, (self.x_layers, self.config.n_qubits))
+        weights = self._init_weights_for_key(key)
 
         train_data = self._as_jax_data(train_data)
         val_data = self._as_jax_data(val_data)
@@ -331,8 +449,9 @@ class PQCClassifier:
         # Training mode selection:
         #   catalyst_batch_size > 0 → Catalyst qjit minibatch AD (Python-unrolled, fixed size)
         #   catalyst_batch_size = 0 → JAX jit full-batch AD (no MLIR unrolling, scales to ~10k)
+        #   linear readout        → force JAX full-batch AD (Catalyst AD lowering currently crashes)
         n_train = int(train_data[0].shape[0] if self.use_double_reuploading else train_data.shape[0])
-        use_fullbatch_jax = (self.config.catalyst_batch_size == 0)
+        use_fullbatch_jax = (self.config.catalyst_batch_size == 0) or self.use_linear_readout
 
         if use_fullbatch_jax:
             opt, step_fn = self._make_jax_fullbatch_step()

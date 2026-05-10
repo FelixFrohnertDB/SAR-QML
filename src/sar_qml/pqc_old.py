@@ -39,6 +39,7 @@ class PQCConfig:
     log_interval: int = 10
     eval_every: int = 5
     show_progress: bool = False
+    catalyst_batch_size: int = 64
 
 
 class PQCClassifier:
