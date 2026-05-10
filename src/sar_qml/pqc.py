@@ -415,6 +415,77 @@ class PQCClassifier:
 
         return opt, run_step
 
+    def _make_jax_minibatch_step(self, batch_size: int):
+        """Build a jax.jit-compiled minibatch step with mask support.
+
+        Used for linear readout mode to avoid Catalyst lowering failures while
+        keeping minibatch training behavior.
+        """
+        opt = self.get_optimizer()
+        epsilon = float(self.config.epsilon)
+        weight_decay = float(self.config.weight_decay)
+
+        if self.use_double_reuploading:
+            @jax.jit
+            def run_step(weights, opt_state, batch_x, batch_f, batch_y, batch_mask):
+                probs = self.predict((batch_x, batch_f), weights)
+                probs = jnp.clip(probs, epsilon, 1.0 - epsilon)
+                sample_losses = -(batch_y * jnp.log(probs) + (1.0 - batch_y) * jnp.log(1.0 - probs))
+                denom = jnp.maximum(jnp.sum(batch_mask), jnp.asarray(1.0, dtype=weights.dtype))
+                bce = jnp.sum(batch_mask * sample_losses) / denom
+                if weight_decay > 0.0:
+                    bce = bce + weight_decay * jnp.sum(weights ** 2)
+
+                grads = jax.grad(lambda w: (
+                    jnp.sum(
+                        batch_mask
+                        * (
+                            -(
+                                batch_y * jnp.log(jnp.clip(self.predict((batch_x, batch_f), w), epsilon, 1.0 - epsilon))
+                                + (1.0 - batch_y)
+                                * jnp.log(1.0 - jnp.clip(self.predict((batch_x, batch_f), w), epsilon, 1.0 - epsilon))
+                            )
+                        )
+                    )
+                    / jnp.maximum(jnp.sum(batch_mask), jnp.asarray(1.0, dtype=w.dtype))
+                    + (weight_decay * jnp.sum(w ** 2) if weight_decay > 0.0 else 0.0)
+                ))(weights)
+
+                updates, new_opt_state = opt.update(grads, opt_state, weights)
+                new_weights = optax.apply_updates(weights, updates)
+                return new_weights, new_opt_state, bce
+        else:
+            @jax.jit
+            def run_step(weights, opt_state, batch_x, batch_y, batch_mask):
+                probs = self.predict(batch_x, weights)
+                probs = jnp.clip(probs, epsilon, 1.0 - epsilon)
+                sample_losses = -(batch_y * jnp.log(probs) + (1.0 - batch_y) * jnp.log(1.0 - probs))
+                denom = jnp.maximum(jnp.sum(batch_mask), jnp.asarray(1.0, dtype=weights.dtype))
+                bce = jnp.sum(batch_mask * sample_losses) / denom
+                if weight_decay > 0.0:
+                    bce = bce + weight_decay * jnp.sum(weights ** 2)
+
+                grads = jax.grad(lambda w: (
+                    jnp.sum(
+                        batch_mask
+                        * (
+                            -(
+                                batch_y * jnp.log(jnp.clip(self.predict(batch_x, w), epsilon, 1.0 - epsilon))
+                                + (1.0 - batch_y)
+                                * jnp.log(1.0 - jnp.clip(self.predict(batch_x, w), epsilon, 1.0 - epsilon))
+                            )
+                        )
+                    )
+                    / jnp.maximum(jnp.sum(batch_mask), jnp.asarray(1.0, dtype=w.dtype))
+                    + (weight_decay * jnp.sum(w ** 2) if weight_decay > 0.0 else 0.0)
+                ))(weights)
+
+                updates, new_opt_state = opt.update(grads, opt_state, weights)
+                new_weights = optax.apply_updates(weights, updates)
+                return new_weights, new_opt_state, bce
+
+        return opt, run_step
+
     def _run_eager_chunk(self, weights, opt, opt_state, train_data, y_train, steps: int):
         losses = []
         for _ in range(steps):
@@ -447,13 +518,18 @@ class PQCClassifier:
         eval_every = max(1, int(self.config.eval_every))
 
         # Training mode selection:
-        #   catalyst_batch_size > 0 → Catalyst qjit minibatch AD (Python-unrolled, fixed size)
-        #   catalyst_batch_size = 0 → JAX jit full-batch AD (no MLIR unrolling, scales to ~10k)
-        #   linear readout        → force JAX full-batch AD (Catalyst AD lowering currently crashes)
+        #   non-linear + catalyst_batch_size > 0 → Catalyst qjit minibatch AD
+        #   non-linear + catalyst_batch_size = 0 → JAX jit full-batch AD
+        #   linear + catalyst_batch_size > 0     → JAX jit minibatch AD
+        #   linear + catalyst_batch_size = 0     → JAX jit full-batch AD
         n_train = int(train_data[0].shape[0] if self.use_double_reuploading else train_data.shape[0])
-        use_fullbatch_jax = (self.config.catalyst_batch_size == 0) or self.use_linear_readout
+        use_jax_linear_minibatch = self.use_linear_readout and (self.config.catalyst_batch_size > 0)
+        use_fullbatch_jax = (self.config.catalyst_batch_size == 0)
 
-        if use_fullbatch_jax:
+        if use_jax_linear_minibatch:
+            batch_size = max(1, min(int(self.config.catalyst_batch_size), n_train))
+            opt, step_fn = self._make_jax_minibatch_step(batch_size)
+        elif use_fullbatch_jax:
             opt, step_fn = self._make_jax_fullbatch_step()
         else:
             opt = self.get_optimizer()

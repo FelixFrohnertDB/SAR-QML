@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from pennylane import numpy as pp
 from sklearn.model_selection import StratifiedKFold
 
 from sar_qml.pqc import PQCClassifier, PQCConfig
@@ -439,10 +438,9 @@ def teacher_student_dataset(
         **{k: v for k, v in config.__dict__.items() if k != "weight_init_scale"},
         weight_init_scale=teacher_weight_init_scale,
     )
-    pp.random.seed(seed + 99999)
     teacher = PQCClassifier(teacher_config, use_double_reuploading=True)
     teacher_weights = teacher.init_weights()
-    probs = np.asarray(teacher.predict((pp.array(x_data), pp.array(f_data)), teacher_weights), dtype=np.float64)
+    probs = np.asarray(teacher.predict((x_data, f_data), teacher_weights), dtype=np.float64)
 
     if use_soft_labels:
         # Soft labels: raw probabilities in [0, 1].  BCE handles these naturally and
@@ -498,9 +496,9 @@ def _train_single_fold(
     model = PQCClassifier(config, use_double_reuploading=use_double_reuploading)
     best_weights, history, best_val_acc = model.train_fold(
         train_payload,
-        pp.array(y_train),
+        np.asarray(y_train),
         val_payload,
-        pp.array(y_val),
+        np.asarray(y_val),
         fold_id,
     )
     return np.asarray(best_weights), history, float(best_val_acc)
@@ -526,14 +524,14 @@ def run_crossval(
 
         if use_double_reuploading:
             assert f_data is not None
-            train_payload = (pp.array(x_data[train_idx]), pp.array(f_data[train_idx]))
-            val_payload = (pp.array(x_data[val_idx]), pp.array(f_data[val_idx]))
+            train_payload = (np.asarray(x_data[train_idx]), np.asarray(f_data[train_idx]))
+            val_payload = (np.asarray(x_data[val_idx]), np.asarray(f_data[val_idx]))
         else:
             if f_data is None:
                 x_single = x_data
             
-            train_payload = pp.array(x_single[train_idx])
-            val_payload = pp.array(x_single[val_idx])
+            train_payload = np.asarray(x_single[train_idx])
+            val_payload = np.asarray(x_single[val_idx])
 
         best_w, history, best_val_acc = _train_single_fold(
             config,
@@ -587,11 +585,11 @@ def run_crossval_single_fold(
 
     if use_double_reuploading:
         assert f_data is not None
-        train_payload = (pp.array(x_data[train_idx]), pp.array(f_data[train_idx]))
-        val_payload = (pp.array(x_data[val_idx]), pp.array(f_data[val_idx]))
+        train_payload = (np.asarray(x_data[train_idx]), np.asarray(f_data[train_idx]))
+        val_payload = (np.asarray(x_data[val_idx]), np.asarray(f_data[val_idx]))
     else:
-        train_payload = pp.array(x_data[train_idx])
-        val_payload = pp.array(x_data[val_idx])
+        train_payload = np.asarray(x_data[train_idx])
+        val_payload = np.asarray(x_data[val_idx])
 
     best_w, history, best_val_acc = _train_single_fold(
         config,
