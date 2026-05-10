@@ -255,81 +255,203 @@ from typing import Tuple
 import numpy as np
 from typing import Tuple
 
+# def linear_mnudft_dataset(
+#     n_samples: int,
+#     n_positions: int,
+#     n_frequencies: int,
+#     seed: int,
+#     noise_scale: float = 0.0,
+#     margin: float = 0.2, # Added margin parameter
+# ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    
+#     rng = np.random.default_rng(seed)
+
+#     # --- Fixed spatial geometry p_d in R^2 ---
+#     angles = np.linspace(0.0, 2.0 * np.pi, n_positions, endpoint=False)
+#     positions = np.stack([np.cos(angles), np.sin(angles)], axis=1).astype(np.float64)
+
+#     # --- Complex separator in spectral space ---
+#     w = rng.normal(size=n_frequencies) + 1j * rng.normal(size=n_frequencies)
+
+#     # --- Storage for valid samples ---
+#     x_list = []
+#     f_list = []
+#     score_list = []
+
+#     # --- Rejection Sampling Loop ---
+#     # We continue until we have exactly n_samples that pass the margin filter
+#     while len(x_list) < n_samples:
+#         # 1. Generate candidate real-valued input channels
+#         x0 = rng.normal(size=n_positions)
+#         x1 = rng.normal(size=n_positions)
+        
+#         # Normalization
+#         x0 /= np.max(np.abs(x0)) + 1e-12
+#         x1 /= np.max(np.abs(x1)) + 1e-12
+
+#         # 2. Generate non-uniform frequency queries
+#         f_pairs = rng.uniform(low=-1.0, high=1.0, size=(n_frequencies, 2))
+
+#         # 3. Complex MNUDFT evaluation
+#         x_complex = x0 + 1j * x1
+#         X = np.zeros(n_frequencies, dtype=np.complex128)
+#         for k in range(n_frequencies):
+#             phase = 2.0 * np.pi * (positions @ f_pairs[k])
+#             kernel = np.exp(-1j * phase)
+#             X[k] = np.sum(x_complex * kernel)
+
+#         # 4. Calculate Score
+#         score = np.real(np.sum(w * X))
+#         if noise_scale > 0.0:
+#             score += noise_scale * rng.normal()
+
+#         # 5. MARGIN FILTER
+#         # Only keep the point if it is outside the decision boundary "radius"
+#         # We assume the boundary is at 0 (the expected mean of the scores)
+#         if np.abs(score) >= margin:
+#             # Flatten x and f for storage
+#             x_flat = np.zeros(2 * n_positions)
+#             x_flat[0::2] = x0
+#             x_flat[1::2] = x1
+            
+#             f_flat = np.zeros(2 * n_frequencies)
+#             f_flat[0::2] = f_pairs[:, 0]
+#             f_flat[1::2] = f_pairs[:, 1]
+
+#             x_list.append(x_flat)
+#             f_list.append(f_flat)
+#             score_list.append(score)
+
+#     # --- Finalize Arrays ---
+#     x_data = np.array(x_list)
+#     f_data = np.array(f_list)
+#     scores = np.array(score_list)
+
+#     # Balanced binary labels based on the scores
+#     # Since we already filtered around 0, the median will still be near 0
+#     threshold = np.median(scores)
+#     y = (scores > threshold).astype(np.int64)
+
+#     return x_data, f_data, y
+
 def linear_mnudft_dataset(
     n_samples: int,
     n_positions: int,
     n_frequencies: int,
     seed: int,
     noise_scale: float = 0.0,
-    margin: float = 0.2, # Added margin parameter
+    margin: float = 0.2,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    
+
     rng = np.random.default_rng(seed)
 
-    # --- Fixed spatial geometry p_d in R^2 ---
+    # ------------------------------------------------------------
+    # Fixed 2D spatial geometry p_d ∈ R^2
+    # ------------------------------------------------------------
     angles = np.linspace(0.0, 2.0 * np.pi, n_positions, endpoint=False)
-    positions = np.stack([np.cos(angles), np.sin(angles)], axis=1).astype(np.float64)
 
-    # --- Complex separator in spectral space ---
+    positions = np.stack(
+        [np.cos(angles), np.sin(angles)],
+        axis=1
+    ).astype(np.float64)
+
+    # ------------------------------------------------------------
+    # Complex linear separator in spectral space
+    # The input signal remains strictly real-valued.
+    # Only the MNUDFT coefficients become complex.
+    # ------------------------------------------------------------
     w = rng.normal(size=n_frequencies) + 1j * rng.normal(size=n_frequencies)
 
-    # --- Storage for valid samples ---
+    # ------------------------------------------------------------
+    # Storage
+    # ------------------------------------------------------------
     x_list = []
     f_list = []
     score_list = []
 
-    # --- Rejection Sampling Loop ---
-    # We continue until we have exactly n_samples that pass the margin filter
+    # ------------------------------------------------------------
+    # Rejection sampling loop
+    # ------------------------------------------------------------
     while len(x_list) < n_samples:
-        # 1. Generate candidate real-valued input channels
-        x0 = rng.normal(size=n_positions)
-        x1 = rng.normal(size=n_positions)
-        
-        # Normalization
-        x0 /= np.max(np.abs(x0)) + 1e-12
-        x1 /= np.max(np.abs(x1)) + 1e-12
 
-        # 2. Generate non-uniform frequency queries
-        f_pairs = rng.uniform(low=-1.0, high=1.0, size=(n_frequencies, 2))
+        # --------------------------------------------------------
+        # 1. Generate REAL-valued reflectivity signal
+        # x(p_d) ∈ R
+        # --------------------------------------------------------
+        x = rng.normal(size=n_positions)
 
-        # 3. Complex MNUDFT evaluation
-        x_complex = x0 + 1j * x1
+        # Normalize
+        x /= np.max(np.abs(x)) + 1e-12
+
+        # --------------------------------------------------------
+        # 2. Generate nonuniform 2D frequency queries
+        # f_k ∈ R^2
+        # --------------------------------------------------------
+        f_pairs = rng.uniform(
+            low=-1.0,
+            high=1.0,
+            size=(n_frequencies, 2)
+        )
+
+        # --------------------------------------------------------
+        # 3. Evaluate complex MNUDFT
+        #
+        # X_k = Σ_d x_d exp(-i 2π p_d · f_k)
+        #
+        # The signal x is real-valued.
+        # The Fourier response X is complex-valued.
+        # --------------------------------------------------------
         X = np.zeros(n_frequencies, dtype=np.complex128)
-        for k in range(n_frequencies):
-            phase = 2.0 * np.pi * (positions @ f_pairs[k])
-            kernel = np.exp(-1j * phase)
-            X[k] = np.sum(x_complex * kernel)
 
-        # 4. Calculate Score
+        for k in range(n_frequencies):
+
+            phase = 2.0 * np.pi * (positions @ f_pairs[k])
+
+            kernel = np.exp(-1j * phase)
+
+            X[k] = np.sum(x * kernel)
+
+        # --------------------------------------------------------
+        # 4. Linear separator in spectral space
+        # --------------------------------------------------------
         score = np.real(np.sum(w * X))
+
         if noise_scale > 0.0:
             score += noise_scale * rng.normal()
 
-        # 5. MARGIN FILTER
-        # Only keep the point if it is outside the decision boundary "radius"
-        # We assume the boundary is at 0 (the expected mean of the scores)
+        # --------------------------------------------------------
+        # 5. Margin filtering
+        # --------------------------------------------------------
         if np.abs(score) >= margin:
-            # Flatten x and f for storage
-            x_flat = np.zeros(2 * n_positions)
-            x_flat[0::2] = x0
-            x_flat[1::2] = x1
-            
+
+            # x is already strictly real-valued
+            x_list.append(x.astype(np.float64))
+
+            # Flatten frequency pairs:
+            # [fx0, fy0, fx1, fy1, ...]
             f_flat = np.zeros(2 * n_frequencies)
+
             f_flat[0::2] = f_pairs[:, 0]
             f_flat[1::2] = f_pairs[:, 1]
 
-            x_list.append(x_flat)
-            f_list.append(f_flat)
+            f_list.append(f_flat.astype(np.float64))
+
             score_list.append(score)
 
-    # --- Finalize Arrays ---
-    x_data = np.array(x_list)
-    f_data = np.array(f_list)
-    scores = np.array(score_list)
+    # ------------------------------------------------------------
+    # Final arrays
+    # ------------------------------------------------------------
+    x_data = np.array(x_list, dtype=np.float64)
 
-    # Balanced binary labels based on the scores
-    # Since we already filtered around 0, the median will still be near 0
+    f_data = np.array(f_list, dtype=np.float64)
+
+    scores = np.array(score_list, dtype=np.float64)
+
+    # ------------------------------------------------------------
+    # Balanced binary labels
+    # ------------------------------------------------------------
     threshold = np.median(scores)
+
     y = (scores > threshold).astype(np.int64)
 
     return x_data, f_data, y
