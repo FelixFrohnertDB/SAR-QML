@@ -23,7 +23,7 @@ source /home/frohnertf/data1/githubRepos/SAR-QML/.venv/bin/activate
 # ── Experiment configuration ──────────────────────────────────────────────────
 
 ARGS=(
-    --n-samples 10000 
+    --n-samples 5000 
     --run-name "e1" 
     --n-qubits 2
     --show-progress  
@@ -32,6 +32,8 @@ ARGS=(
     --n-folds 5
     --fold-index "${SLURM_ARRAY_TASK_ID}"
     --readout_mode linear
+    --learning_rate 0.005
+    --catalyst-batch-size 128
 
 )
 
