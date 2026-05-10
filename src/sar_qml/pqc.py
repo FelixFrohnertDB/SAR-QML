@@ -110,7 +110,7 @@ class PQCConfig:
 
     # training
     n_epochs: int = 200
-    learning_rate: float = 0.01  # Increased slightly for Adjoint
+    learning_rate: float = 0.005  # Increased slightly for Adjoint
     optimizer: str = "adam" 
 
     # optimizer params
@@ -127,13 +127,13 @@ class PQCConfig:
     min_improvement: float = 1e-3
 
     # regularization
-    weight_init_scale: float = 0.01
+    weight_init_scale: float = 0.03
     weight_decay: float = 0.0
     epsilon: float = 1e-7
     log_interval: int = 10
     eval_every: int = 5
     show_progress: bool = False
-    catalyst_batch_size: int = 64
+    catalyst_batch_size: int = 128
     readout_mode: str = "single"
     readout_wires: Optional[int] = None
 
