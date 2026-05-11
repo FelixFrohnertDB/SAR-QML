@@ -127,8 +127,8 @@ class PQCConfig:
     min_improvement: float = 1e-3
 
     # regularization
-    weight_init_scale: float = 0.03
-    init_scale_mode: str = "system"
+    weight_init_scale: float = 0.01
+    init_scale_mode: str = "legacy"
     quantum_init_scale: Optional[float] = None
     readout_init_scale: Optional[float] = None
     weight_decay: float = 0.0
