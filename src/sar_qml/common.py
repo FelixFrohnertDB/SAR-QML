@@ -82,6 +82,28 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
     parser.add_argument(
+        "--init-scale-mode",
+        type=str,
+        default="system",
+        choices=["system", "legacy"],
+        help=(
+            "Initialization policy: 'system' uses split quantum/readout scales with "
+            "a mild small-system quantum boost; 'legacy' keeps the original single scale."
+        ),
+    )
+    parser.add_argument(
+        "--quantum-init-scale",
+        type=float,
+        default=None,
+        help="Optional override for quantum-parameter initialization scale.",
+    )
+    parser.add_argument(
+        "--readout-init-scale",
+        type=float,
+        default=None,
+        help="Optional override for readout-parameter initialization scale in linear mode.",
+    )
+    parser.add_argument(
         "--weight-decay",
         type=float,
         default=0.0,
@@ -114,6 +136,9 @@ def config_from_args(args: argparse.Namespace) -> PQCConfig:
         n_folds=args.n_folds,
         random_state=args.seed,
         learning_rate=args.lr,
+        init_scale_mode=args.init_scale_mode,
+        quantum_init_scale=args.quantum_init_scale,
+        readout_init_scale=args.readout_init_scale,
         weight_decay=args.weight_decay,
         patience=args.patience,
         eval_every=args.eval_every,

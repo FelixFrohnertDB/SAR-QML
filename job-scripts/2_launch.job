@@ -2,7 +2,7 @@
 #SBATCH --job-name=train-graph
 #SBATCH --output=./%x_%A_%a.out
 #SBATCH --error=./%x_%A_%a.err
-#SBATCH --time=0-4:00:00
+#SBATCH --time=0-2:00:00
 #SBATCH --mem=8GB
 #SBATCH --partition=gpu_lion
 #SBATCH --account=gpu_lion
@@ -23,7 +23,7 @@ source /home/frohnertf/data1/githubRepos/SAR-QML/.venv/bin/activate
 # ── Experiment configuration ──────────────────────────────────────────────────
 
 ARGS=(
-    --n-samples 5000 
+    --n-samples 10000 
     --run-name "e1" 
     --n-qubits 2
     --show-progress  
@@ -33,7 +33,8 @@ ARGS=(
     --fold-index "${SLURM_ARRAY_TASK_ID}"
     --readout-mode linear
     --lr 0.005
-    --catalyst-batch-size 128
+    --catalyst-batch-size 256
+    --quantum-init-scale 0.05
 
 )
 

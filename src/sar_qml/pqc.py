@@ -128,6 +128,9 @@ class PQCConfig:
 
     # regularization
     weight_init_scale: float = 0.03
+    init_scale_mode: str = "system"
+    quantum_init_scale: Optional[float] = None
+    readout_init_scale: Optional[float] = None
     weight_decay: float = 0.0
     epsilon: float = 1e-7
     log_interval: int = 10
@@ -330,18 +333,62 @@ class PQCClassifier:
         key = jax.random.PRNGKey(self.config.random_state)
         return self._init_weights_for_key(key)
 
+    def _resolve_init_scales(self) -> Tuple[float, float]:
+        """Return (quantum_scale, readout_scale) for parameter initialization.
+
+        Rationale:
+        - In exp2, weak/stuck folds correlate with low final quantum-weight norms,
+          especially at n=2.
+        - We therefore mildly boost quantum initialization for very small systems
+          while keeping readout initialization small so the head does not dominate
+          the early optimization signal.
+        """
+        base = float(self.config.weight_init_scale)
+
+        if self.config.init_scale_mode == "legacy":
+            default_q = base
+            default_r = base
+        else:
+            # Boost only for small systems (n=2 gets ~sqrt(2) boost; n>=4 unchanged).
+            n_qubits = max(1, int(self.config.n_qubits))
+            small_system_boost = max(1.0, np.sqrt(4.0 / n_qubits))
+            default_q = base * small_system_boost
+
+            # Keep readout smaller than quantum by default to avoid early head dominance.
+            default_r = base * 0.35 / np.sqrt(max(1, self.readout_dim))
+
+        q_scale = (
+            float(self.config.quantum_init_scale)
+            if self.config.quantum_init_scale is not None
+            else default_q
+        )
+        r_scale = (
+            float(self.config.readout_init_scale)
+            if self.config.readout_init_scale is not None
+            else default_r
+        )
+        return q_scale, r_scale
+
     def _init_weights_for_key(self, key):
+        quantum_scale, readout_scale = self._resolve_init_scales()
+
         if self.use_linear_readout:
-            n_params = self._quantum_param_size() + self.readout_dim + 1
-            return self.config.weight_init_scale * jax.random.normal(key, (n_params,))
+            q_size = self._quantum_param_size()
+            key_q, key_rw, key_rb = jax.random.split(key, 3)
+
+            quantum_weights = quantum_scale * jax.random.normal(key_q, (q_size,))
+            readout_w = readout_scale * jax.random.normal(key_rw, (self.readout_dim,))
+            readout_b = readout_scale * jax.random.normal(key_rb, (1,))
+
+            return jnp.concatenate([quantum_weights, readout_w, readout_b], axis=0)
 
         if self.use_double_reuploading:
             # Flat 1D: [x_layers * n_qubits] x-weights then [f_layers * n_qubits] f-weights.
             n_params = (self.x_layers + self.f_layers) * self.config.n_qubits
-            return self.config.weight_init_scale * jax.random.normal(key, (n_params,))
+            return quantum_scale * jax.random.normal(key, (n_params,))
         else:
             shape = (self.x_layers, self.config.n_qubits)
-            return self.config.weight_init_scale * jax.random.normal(key, shape)
+            return quantum_scale * jax.random.normal(key, shape)
 
     def get_optimizer(self):
         if self.config.optimizer.lower() == "adam":
