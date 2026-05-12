@@ -1,137 +1,106 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from src.sar_qml.common import (
-    balanced_subsample,
+from sar_qml.common import (
     config_from_args,
-    load_sar_csv,
     make_common_parser,
     make_experiment_dir,
+    print_summary,
+    raw_sar_synthetic_dataset,
     run_paired_models,
+    run_paired_models_single_fold,
     save_results_bundle,
 )
 
-
-def run_case(config, raw_csv: Path, focused_csv: Path | None, label_threshold: int, seed: int):
-    x_raw, f_raw, y_raw, _ = load_sar_csv(
-        raw_csv,
-        prefix="raw",
-        n_qubits=config.n_qubits,
-        label_threshold=label_threshold,
-        seed=seed,
-    )
-    raw_result = run_paired_models(config=config, x_data=x_raw, f_data=f_raw, y=y_raw)
-
-    focused_result = None
-    if focused_csv is not None and focused_csv.exists():
-        x_foc, f_foc, y_foc, _ = load_sar_csv(
-            focused_csv,
-            prefix="focused",
-            n_qubits=config.n_qubits,
-            label_threshold=label_threshold,
-            seed=seed + 11,
-        )
-        focused_result = run_paired_models(config=config, x_data=x_foc, f_data=f_foc, y=y_foc)
-
-    return raw_result, focused_result
-
-
 def main() -> None:
-    parser = make_common_parser("Experiment 5: Final raw SAR classification benchmark")
+    parser = make_common_parser("Experiment 3: Synthetic raw SAR classification")
+    parser.add_argument("--n-samples", type=int, default=500, help="Number of synthetic samples")
     parser.add_argument(
-        "--noise-mode",
-        type=str,
-        default="noise",
-        choices=["noise", "nonoise"],
-        help="Which SAR CSV set to use",
+        "--noise-scale",
+        type=float,
+        default=0.03,
+        help="Complex measurement noise scale added before reconstruction",
     )
-    parser.add_argument("--label-threshold", type=int, default=3, help="Positive class if num_targets >= threshold")
-    parser.add_argument("--include-focused", action="store_true", help="Also evaluate focused counterpart as reference")
     parser.add_argument(
-        "--max-samples",
+        "--dominance-ratio",
+        type=float,
+        default=0.55,
+        help="Relative reconstruction threshold used to count dominant reflectors",
+    )
+    parser.add_argument(
+        "--fold-index",
         type=int,
-        default=2000,
-        help="Optional balanced subsample size for practical full-batch training on SAR CSVs",
+        default=None,
+        help="1-based fold index to run a single fold (useful for array jobs)",
     )
     parser.add_argument("--run-name", type=str, default=None, help="Optional output run directory name")
     args = parser.parse_args()
 
+    if args.n_qubits < 2 or (args.n_qubits % 2) != 0:
+        raise ValueError("--n-qubits must be an even integer >= 2")
+    if args.fold_index is not None and (args.fold_index < 1 or args.fold_index > args.n_folds):
+        raise ValueError(f"--fold-index must be in [1, {args.n_folds}]")
+
     config = config_from_args(args)
 
-    base = Path("data")
-    raw_csv = base / f"sar_onedim_{args.noise_mode}_raw_complex_realimag.csv"
-    focused_csv = base / f"sar_onedim_{args.noise_mode}_focused_complex_realimag.csv"
+    if args.n_qubits == 2:
+        class_pair = (0, 1)
+    elif args.n_qubits == 4:
+        class_pair = (1, 2)
+    elif args.n_qubits == 6:
+        class_pair = (2, 3)
+    else:
+        raise ValueError("Experiment 3 currently expects --n-qubits in {2, 4, 6}")
 
-    if not raw_csv.exists():
-        raise FileNotFoundError(f"Missing raw dataset: {raw_csv}")
-
-    x_raw, f_raw, y_raw, raw_ids = load_sar_csv(
-        raw_csv,
-        prefix="raw",
-        n_qubits=config.n_qubits,
-        label_threshold=args.label_threshold,
+    x_data, f_data, y = raw_sar_synthetic_dataset(
+        n_samples=args.n_samples,
+        n_qubits=args.n_qubits,
         seed=args.seed,
+        noise_scale=args.noise_scale,
+        dominance_ratio=args.dominance_ratio,
     )
-    subset_idx, x_raw_sub, y_raw_sub = balanced_subsample(x_raw, y_raw, args.max_samples, args.seed)
-    f_raw_sub = f_raw[subset_idx]
-    raw_result = run_paired_models(config=config, x_data=x_raw_sub, f_data=f_raw_sub, y=y_raw_sub)
 
-    focused_result = None
-    focused_subset_size = None
-    if args.include_focused and focused_csv.exists():
-        x_foc, f_foc, y_foc, _ = load_sar_csv(
-            focused_csv,
-            prefix="focused",
-            n_qubits=config.n_qubits,
-            label_threshold=args.label_threshold,
-            seed=args.seed + 11,
+    if args.fold_index is None:
+        payload = run_paired_models(config=config, x_data=x_data, f_data=f_data, y=y)
+    else:
+        payload = run_paired_models_single_fold(
+            config=config,
+            x_data=x_data,
+            f_data=f_data,
+            y=y,
+            fold_index=args.fold_index,
         )
-        foc_idx, x_foc_sub, y_foc_sub = balanced_subsample(x_foc, y_foc, args.max_samples, args.seed + 11)
-        f_foc_sub = f_foc[foc_idx]
-        focused_subset_size = int(len(y_foc_sub))
-        focused_result = run_paired_models(config=config, x_data=x_foc_sub, f_data=f_foc_sub, y=y_foc_sub)
 
-    payload = {"raw": raw_result}
-    if focused_result is not None:
-        payload["focused_reference"] = focused_result
-
-    out_dir = make_experiment_dir(args.output_root, "exp5_raw_sar_classification", run_name=args.run_name)
+    out_dir = make_experiment_dir(args.output_root, "exp3_raw_sar_classification", run_name=args.run_name)
     save_results_bundle(
         out_dir,
-        "exp5_raw_sar_classification",
+        "exp3_raw_sar_classification",
         config,
-        payload=payload,
+        payload,
         metadata={
-            "noise_mode": args.noise_mode,
-            "label_threshold": args.label_threshold,
-            "max_samples": args.max_samples,
-            "raw_dataset_size": int(len(y_raw)),
-            "raw_subset_size": int(len(y_raw_sub)),
-            "raw_csv": str(raw_csv),
-            "focused_csv": str(focused_csv) if args.include_focused else None,
-            "focused_subset_size": focused_subset_size,
+            "n_samples": args.n_samples,
+            "n_qubits": args.n_qubits,
+            "n_measurements": args.n_qubits // 2,
+            "n_scene_positions": min(3, args.n_qubits // 2),
+            "class_pair": {
+                "class_0_reflectors": class_pair[0],
+                "class_1_reflectors": class_pair[1],
+            },
+            "noise_scale": args.noise_scale,
+            "dominance_ratio": args.dominance_ratio,
+            "fold_index": args.fold_index,
+            "label_balance": {
+                "class_0": int((y == 0).sum()),
+                "class_1": int((y == 1).sum()),
+            },
         },
     )
 
-    print("\n=== Experiment 5 complete ===")
-    print(
-        f"raw/aligned: {raw_result['aligned']['mean_best_val_acc']:.4f} +/- "
-        f"{raw_result['aligned']['std_best_val_acc']:.4f}"
-    )
-    print(
-        f"raw/standard: {raw_result['standard']['mean_best_val_acc']:.4f} +/- "
-        f"{raw_result['standard']['std_best_val_acc']:.4f}"
-    )
-    if focused_result is not None:
-        print(
-            f"focused/aligned: {focused_result['aligned']['mean_best_val_acc']:.4f} +/- "
-            f"{focused_result['aligned']['std_best_val_acc']:.4f}"
-        )
-        print(
-            f"focused/standard: {focused_result['standard']['mean_best_val_acc']:.4f} +/- "
-            f"{focused_result['standard']['std_best_val_acc']:.4f}"
-        )
+    summary_title = f"E3 synthetic raw SAR complete (N={args.n_qubits})"
+    if args.fold_index is not None:
+        summary_title = f"E3 synthetic raw SAR complete (N={args.n_qubits}, fold={args.fold_index})"
+    print_summary(payload, summary_title)
+
+    print("\n=== Experiment 3 complete ===")
     print(f"saved to: {out_dir}")
 
 
