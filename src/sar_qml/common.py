@@ -320,6 +320,112 @@ def linear_mnudft_dataset(
 
     return x_data, f_data, y
 
+
+def raw_sar_synthetic_dataset(
+    n_samples: int,
+    n_qubits: int,
+    seed: int,
+    noise_scale: float = 0.03,
+    dominance_ratio: float = 0.55,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Synthetic raw-SAR task with labels defined after image reconstruction.
+
+    The raw input x stores real/imag parts of complex measurements at K=n_qubits/2
+    non-uniform query locations. The paired input f stores the flattened 2D query
+    coordinates [fx0, fy0, fx1, fy1, ...]. Labels are extracted from a simple
+    inverse reconstruction by counting dominant reflectors in the reconstructed image.
+    """
+    if n_qubits < 2 or (n_qubits % 2) != 0:
+        raise ValueError("n_qubits must be an even integer >= 2")
+
+    rng = np.random.default_rng(seed)
+    n_measurements = n_qubits // 2
+    n_scene_positions = min(3, n_measurements)
+
+    if n_scene_positions == 1:
+        counts_by_label = {0: np.array([0], dtype=np.int64), 1: np.array([1], dtype=np.int64)}
+    elif n_scene_positions == 2:
+        counts_by_label = {0: np.array([1], dtype=np.int64), 1: np.array([2], dtype=np.int64)}
+    else:
+        counts_by_label = {0: np.array([2], dtype=np.int64), 1: np.array([3], dtype=np.int64)}
+
+    label_by_count = {
+        int(count): int(label)
+        for label, counts in counts_by_label.items()
+        for count in counts
+    }
+
+    if n_scene_positions == 1:
+        scene_positions = np.array([[0.0, 0.0]], dtype=np.float64)
+    else:
+        axis = np.linspace(-0.75, 0.75, n_scene_positions, dtype=np.float64)
+        scene_positions = np.stack([axis, 0.35 * np.sin(np.pi * axis)], axis=1).astype(np.float64)
+
+    x_list: List[np.ndarray] = []
+    f_list: List[np.ndarray] = []
+    y_list: List[int] = []
+
+    if n_measurements == 1:
+        base_query_pairs = np.array([[0.35, -0.25]], dtype=np.float64)
+    else:
+        base_axis = np.linspace(-0.8, 0.8, n_measurements, dtype=np.float64)
+        base_query_pairs = np.stack([base_axis, base_axis[::-1]], axis=1).astype(np.float64)
+
+    while len(x_list) < n_samples:
+        desired_label = len(x_list) % 2
+        active_count = int(rng.choice(counts_by_label[desired_label]))
+
+        reflectivity = np.zeros(n_scene_positions, dtype=np.float64)
+        if active_count > 0:
+            support = rng.choice(n_scene_positions, size=active_count, replace=False)
+            reflectivity[support] = rng.uniform(0.8, 1.2, size=active_count)
+
+        query_pairs = np.clip(
+            base_query_pairs + 0.08 * rng.normal(size=(n_measurements, 2)),
+            -1.0,
+            1.0,
+        ).astype(np.float64)
+        phases = 2.0 * np.pi * (scene_positions @ query_pairs.T)
+        sensing_matrix = np.exp(-1j * phases).T
+        if np.linalg.cond(sensing_matrix) > 20.0:
+            continue
+
+        measurements = sensing_matrix @ reflectivity
+
+        if noise_scale > 0.0 and active_count > 0:
+            noise = rng.normal(size=n_measurements) + 1j * rng.normal(size=n_measurements)
+            measurements = measurements + noise_scale * noise / np.sqrt(2.0)
+
+        reconstruction = np.abs(np.linalg.pinv(sensing_matrix) @ measurements)
+        peak = float(np.max(reconstruction))
+        if peak <= 1e-8:
+            dominant_count = 0
+        else:
+            dominant_count = int(np.sum(reconstruction >= dominance_ratio * peak))
+        label = label_by_count.get(dominant_count)
+        if label is None:
+            continue
+        if label != desired_label:
+            continue
+
+        x_features = np.concatenate([measurements.real, measurements.imag]).astype(np.float64)
+        f_features = np.empty(n_qubits, dtype=np.float64)
+        f_features[0::2] = query_pairs[:, 0]
+        f_features[1::2] = query_pairs[:, 1]
+
+        x_list.append(x_features)
+        f_list.append(f_features)
+        y_list.append(label)
+
+    x_data = np.asarray(x_list, dtype=np.float64)
+    x_data = (x_data - x_data.mean(axis=0)) / (x_data.std(axis=0) + 1e-8)
+
+    f_data = np.asarray(f_list, dtype=np.float64)
+    y = np.asarray(y_list, dtype=np.int64)
+
+    order = rng.permutation(n_samples)
+    return x_data[order], f_data[order], y[order]
+
 def simulate_reflector_dataset(
     n_samples: int,
     n_qubits: int,
