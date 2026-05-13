@@ -71,8 +71,15 @@ def main() -> None:
         )
 
     out_dir = make_experiment_dir(args.output_root, "exp3_raw_sar_classification", run_name=args.run_name)
+
+    case_out_dir = out_dir / f"case_n{args.n_qubits}"
+    if args.fold_index is not None:
+        case_out_dir = case_out_dir / f"fold_{args.fold_index}"
+    case_out_dir.mkdir(parents=True, exist_ok=True)
+    (case_out_dir / "weights").mkdir(parents=True, exist_ok=True)
+
     save_results_bundle(
-        out_dir,
+        case_out_dir,
         "exp3_raw_sar_classification",
         config,
         payload,
@@ -101,7 +108,7 @@ def main() -> None:
     print_summary(payload, summary_title)
 
     print("\n=== Experiment 3 complete ===")
-    print(f"saved to: {out_dir}")
+    print(f"saved to: {case_out_dir}")
 
 
 if __name__ == "__main__":
