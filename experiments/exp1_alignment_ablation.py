@@ -48,6 +48,7 @@ def main() -> None:
         threshold=args.threshold,
         teacher_weight_init_scale=args.teacher_weight_init_scale,
         use_soft_labels=use_soft_labels,
+        fixed_f=args.fixed_f,
     )
 
     if args.fold_index is None:
@@ -67,6 +68,8 @@ def main() -> None:
     metadata = {
         "n_samples": args.n_samples,
         "fold_index": args.fold_index,
+        "fixed_f": args.fixed_f,
+        "f_encoding_axis": args.f_encoding_axis,
         "use_soft_labels": use_soft_labels,
         "teacher_weight_init_scale": args.teacher_weight_init_scale,
         "threshold": args.threshold,

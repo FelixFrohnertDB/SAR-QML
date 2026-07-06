@@ -43,6 +43,7 @@ def main() -> None:
         n_positions=args.n_qubits // 2,
         n_frequencies=args.n_qubits // 2,
         seed=args.seed,
+        fixed_f=args.fixed_f,
     )
 
     # Run paired models (aligned vs standard X-only)
@@ -65,6 +66,8 @@ def main() -> None:
         "n_positions": args.n_qubits // 2,
         "n_frequencies": args.n_qubits // 2,
         "fold_index": args.fold_index,
+        "fixed_f": args.fixed_f,
+        "f_encoding_axis": args.f_encoding_axis,
         "label_balance": {
             "class_0": int((y_hard == 0).sum()),
             "class_1": int((y_hard == 1).sum()),

@@ -33,6 +33,8 @@ ARGS=(
     --fold-index "${SLURM_ARRAY_TASK_ID}"
     --readout_mode linear
     --catalyst-batch-size 128
+    --fixed-f
+    --f-encoding-axis Z
 
 )
 

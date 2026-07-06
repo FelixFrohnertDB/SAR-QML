@@ -35,6 +35,8 @@ ARGS=(
     --lr 0.005
     --catalyst-batch-size 256
     --quantum-init-scale 0.05
+    --fixed-f
+    --f-encoding-axis Z
 
 )
 

@@ -108,6 +108,13 @@ class PQCConfig:
     n_x_layers: Optional[int] = None
     n_f_layers: Optional[int] = None
 
+    # Rotation axis used to encode the (fixed) frequency hyperparameter f in the
+    # aligned/double circuit's f-branch. "Y" reproduces the original additive
+    # scheme in which a constant f is absorbed into the adjacent trainable RY.
+    # "Z" (or "X") encodes f on an axis that does NOT commute with the trainable
+    # RY, so a fixed f acts as a genuine, non-absorbable spectral hyperparameter.
+    f_encoding_axis: str = "Y"
+
     # training
     n_epochs: int = 200
     learning_rate: float = 0.005  # Increased slightly for Adjoint
@@ -195,12 +202,14 @@ class PQCClassifier:
     # ------------------------------
     # Circuit components
     # ------------------------------
-    def angle_encoding(self, x):
+    def angle_encoding(self, x, rotation="Y"):
         """
-        Encodes data. 
+        Encodes data.
         If x is shape (batch_size, n_qubits), AngleEmbedding broadcasts automatically.
+        rotation selects the Pauli axis ("X"/"Y"/"Z"). The x-branch uses "Y"; the
+        f-branch uses config.f_encoding_axis so a fixed f can be made non-absorbable.
         """
-        qml.AngleEmbedding(x, wires=range(self.config.n_qubits), rotation="Y")
+        qml.AngleEmbedding(x, wires=range(self.config.n_qubits), rotation=rotation)
 
     def variational_layer(self, w):
         """
@@ -243,12 +252,13 @@ class PQCClassifier:
         nq = self.config.n_qubits
         wx = weights[: self.x_layers * nq].reshape(self.x_layers, nq)
         wf = weights[self.x_layers * nq :].reshape(self.f_layers, nq)
+        f_axis = getattr(self.config, "f_encoding_axis", "Y")
         for l in range(self.max_double_layers):
             if l < self.x_layers:
-                self.angle_encoding(inputs_x)
+                self.angle_encoding(inputs_x, rotation="Y")
                 self.variational_layer(wx[l])
             if l < self.f_layers:
-                self.angle_encoding(inputs_f)
+                self.angle_encoding(inputs_f, rotation=f_axis)
                 self.variational_layer(wf[l])
         if self.use_linear_readout:
             if readout_w is not None:

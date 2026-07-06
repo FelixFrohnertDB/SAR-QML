@@ -81,6 +81,29 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
     parser.add_argument(
+        "--fixed-f",
+        action="store_true",
+        help=(
+            "Treat the frequency configuration f as a dataset-level HYPERPARAMETER: "
+            "draw a single f once and share it across all samples, so labels depend "
+            "on x alone and the standard (x-only) and aligned models are directly "
+            "comparable. Default (off) reproduces the original per-sample-f design."
+        ),
+    )
+    parser.add_argument(
+        "--f-encoding-axis",
+        type=str,
+        default="Y",
+        choices=["X", "Y", "Z"],
+        help=(
+            "Rotation axis for encoding f in the aligned circuit's f-branch. "
+            "'Y' = original additive scheme (a fixed f is absorbed into the "
+            "adjacent trainable RY, i.e. inert under --fixed-f). 'Z' or 'X' make "
+            "the fixed f non-absorbable, so it acts as a genuine spectral "
+            "hyperparameter. Use 'Z' together with --fixed-f."
+        ),
+    )
+    parser.add_argument(
         "--init-scale-mode",
         type=str,
         default="system",
@@ -145,6 +168,7 @@ def config_from_args(args: argparse.Namespace) -> PQCConfig:
         catalyst_batch_size=args.catalyst_batch_size,
         readout_mode=args.readout_mode,
         readout_wires=args.readout_wires,
+        f_encoding_axis=getattr(args, "f_encoding_axis", "Y"),
     )
 
 
@@ -202,9 +226,19 @@ def linear_mnudft_dataset(
     seed: int,
     noise_scale: float = 0.0,
     margin: float = 0.2,
+    fixed_f: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
-    rng = np.random.default_rng(seed)
+    seed_seq = np.random.SeedSequence(seed)
+    rng_task, rng_x, rng_f, rng_noise = [np.random.default_rng(s) for s in seed_seq.spawn(4)]
+
+    # When f is treated as a dataset-level hyperparameter, draw the frequency
+    # configuration ONCE and share it across every sample. The label then depends
+    # on x alone, making the x-only (standard) and aligned models comparable.
+    shared_f_pairs = None
+    if fixed_f:
+        f_vals0 = rng_f.uniform(low=-1.0, high=1.0, size=n_frequencies)
+        shared_f_pairs = np.stack([f_vals0, f_vals0], axis=1)
 
     # ------------------------------------------------------------
     # Fixed 2D spatial geometry p_d ∈ R^2
@@ -221,7 +255,7 @@ def linear_mnudft_dataset(
     # The input signal remains strictly real-valued.
     # Only the MNUDFT coefficients become complex.
     # ------------------------------------------------------------
-    w = rng.normal(size=n_frequencies) + 1j * rng.normal(size=n_frequencies)
+    w = rng_task.normal(size=n_frequencies) + 1j * rng_task.normal(size=n_frequencies)
 
     # ------------------------------------------------------------
     # Storage
@@ -239,7 +273,7 @@ def linear_mnudft_dataset(
         # 1. Generate REAL-valued reflectivity signal
         # x(p_d) ∈ R
         # --------------------------------------------------------
-        x = rng.normal(size=n_positions)
+        x = rng_x.normal(size=n_positions)
 
         # Normalize
         x /= np.max(np.abs(x)) + 1e-12
@@ -254,8 +288,11 @@ def linear_mnudft_dataset(
         #     size=(n_frequencies, 2)
         # )
 
-        f_vals = rng.uniform(low=-1.0, high=1.0, size=n_frequencies)
-        f_pairs = np.stack([f_vals, f_vals], axis=1)
+        if shared_f_pairs is not None:
+            f_pairs = shared_f_pairs
+        else:
+            f_vals = rng_f.uniform(low=-1.0, high=1.0, size=n_frequencies)
+            f_pairs = np.stack([f_vals, f_vals], axis=1)
 
         # --------------------------------------------------------
         # 3. Evaluate complex MNUDFT
@@ -281,7 +318,7 @@ def linear_mnudft_dataset(
         score = np.real(np.sum(w * X))
 
         if noise_scale > 0.0:
-            score += noise_scale * rng.normal()
+            score += noise_scale * rng_noise.normal()
 
         # --------------------------------------------------------
         # 5. Margin filtering
@@ -327,6 +364,7 @@ def raw_sar_synthetic_dataset(
     seed: int,
     noise_scale: float = 0.03,
     dominance_ratio: float = 0.55,
+    fixed_f: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Synthetic raw-SAR task with labels defined after image reconstruction.
 
@@ -338,7 +376,8 @@ def raw_sar_synthetic_dataset(
     if n_qubits < 2 or (n_qubits % 2) != 0:
         raise ValueError("n_qubits must be an even integer >= 2")
 
-    rng = np.random.default_rng(seed)
+    seed_seq = np.random.SeedSequence(seed)
+    rng_scene, rng_query, rng_noise, rng_perm = [np.random.default_rng(s) for s in seed_seq.spawn(4)]
     n_measurements = n_qubits // 2
     n_scene_positions = min(3, n_measurements)
 
@@ -373,18 +412,24 @@ def raw_sar_synthetic_dataset(
 
     while len(x_list) < n_samples:
         desired_label = len(x_list) % 2
-        active_count = int(rng.choice(counts_by_label[desired_label]))
+        active_count = int(rng_scene.choice(counts_by_label[desired_label]))
 
         reflectivity = np.zeros(n_scene_positions, dtype=np.float64)
         if active_count > 0:
-            support = rng.choice(n_scene_positions, size=active_count, replace=False)
-            reflectivity[support] = rng.uniform(0.8, 1.2, size=active_count)
+            support = rng_scene.choice(n_scene_positions, size=active_count, replace=False)
+            reflectivity[support] = rng_scene.uniform(0.8, 1.2, size=active_count)
 
-        query_pairs = np.clip(
-            base_query_pairs + 0.08 * rng.normal(size=(n_measurements, 2)),
-            -1.0,
-            1.0,
-        ).astype(np.float64)
+        if fixed_f:
+            # Fixed acquisition geometry: the same query coordinates for every
+            # scene, so f is a dataset-level hyperparameter and the label depends
+            # only on the reflectivity encoded in x.
+            query_pairs = base_query_pairs.astype(np.float64)
+        else:
+            query_pairs = np.clip(
+                base_query_pairs + 0.08 * rng_query.normal(size=(n_measurements, 2)),
+                -1.0,
+                1.0,
+            ).astype(np.float64)
         phases = 2.0 * np.pi * (scene_positions @ query_pairs.T)
         sensing_matrix = np.exp(-1j * phases).T
         if np.linalg.cond(sensing_matrix) > 20.0:
@@ -393,7 +438,7 @@ def raw_sar_synthetic_dataset(
         measurements = sensing_matrix @ reflectivity
 
         if noise_scale > 0.0 and active_count > 0:
-            noise = rng.normal(size=n_measurements) + 1j * rng.normal(size=n_measurements)
+            noise = rng_noise.normal(size=n_measurements) + 1j * rng_noise.normal(size=n_measurements)
             measurements = measurements + noise_scale * noise / np.sqrt(2.0)
 
         reconstruction = np.abs(np.linalg.pinv(sensing_matrix) @ measurements)
@@ -423,7 +468,7 @@ def raw_sar_synthetic_dataset(
     f_data = np.asarray(f_list, dtype=np.float64)
     y = np.asarray(y_list, dtype=np.int64)
 
-    order = rng.permutation(n_samples)
+    order = rng_perm.permutation(n_samples)
     return x_data[order], f_data[order], y[order]
 
 def simulate_reflector_dataset(
@@ -483,6 +528,7 @@ def teacher_student_dataset(
     threshold: float = 0.5,
     teacher_weight_init_scale: float = 1.0,
     use_soft_labels: bool = True,
+    fixed_f: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate labels from a fixed aligned teacher model with SAR-like x/f semantics.
 
@@ -498,13 +544,14 @@ def teacher_student_dataset(
     soft targets (y in [0,1]) naturally and removes label noise near the decision
     boundary. Set to False to recover hard 0/1 labels via threshold.
     """
-    rng = np.random.default_rng(seed)
+    seed_seq = np.random.SeedSequence(seed)
+    rng_x, rng_f = [np.random.default_rng(s) for s in seed_seq.spawn(2)]
 
     # Build structured reflectivity-style features from synthetic complex returns,
     # then compress to the model input dimension.
     latent_dim = max(4 * config.n_qubits, 16)
-    refl_real = rng.normal(loc=0.0, scale=1.0, size=(n_samples, latent_dim))
-    refl_imag = rng.normal(loc=0.0, scale=1.0, size=(n_samples, latent_dim))
+    refl_real = rng_x.normal(loc=0.0, scale=1.0, size=(n_samples, latent_dim))
+    refl_imag = rng_x.normal(loc=0.0, scale=1.0, size=(n_samples, latent_dim))
     magnitude = np.sqrt(refl_real**2 + refl_imag**2)
     phase = np.arctan2(refl_imag, refl_real)
     reflectivity_features = np.concatenate([magnitude, phase], axis=1)
@@ -517,11 +564,19 @@ def teacher_student_dataset(
     else:
         base_axis = np.linspace(0.0, 1.0, config.n_qubits, dtype=np.float64)
 
-    start_freq = rng.uniform(0.15, 0.9, size=(n_samples, 1))
-    bandwidth = rng.uniform(0.2, 1.4, size=(n_samples, 1))
-    f_data = 2.0 * np.pi * (start_freq + bandwidth * base_axis[None, :])
-    f_data += 0.03 * rng.normal(size=f_data.shape)
-    f_data = f_data.astype(np.float64)
+    if fixed_f:
+        # f as a dataset-level hyperparameter: one probing-frequency vector shared
+        # by all samples, so the teacher's label depends only on x.
+        start_freq = rng_f.uniform(0.15, 0.9, size=(1, 1))
+        bandwidth = rng_f.uniform(0.2, 1.4, size=(1, 1))
+        f_row = 2.0 * np.pi * (start_freq + bandwidth * base_axis[None, :])
+        f_data = np.tile(f_row, (n_samples, 1)).astype(np.float64)
+    else:
+        start_freq = rng_f.uniform(0.15, 0.9, size=(n_samples, 1))
+        bandwidth = rng_f.uniform(0.2, 1.4, size=(n_samples, 1))
+        f_data = 2.0 * np.pi * (start_freq + bandwidth * base_axis[None, :])
+        f_data += 0.03 * rng_f.normal(size=f_data.shape)
+        f_data = f_data.astype(np.float64)
 
     # Teacher uses a dedicated seed offset so its weights are independent of the
     # student's initialisation seed, and a larger init scale so it encodes a

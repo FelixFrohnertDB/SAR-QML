@@ -57,6 +57,7 @@ def main() -> None:
         seed=args.seed,
         noise_scale=args.noise_scale,
         dominance_ratio=args.dominance_ratio,
+        fixed_f=args.fixed_f,
     )
 
     if args.fold_index is None:
@@ -95,6 +96,8 @@ def main() -> None:
             "noise_scale": args.noise_scale,
             "dominance_ratio": args.dominance_ratio,
             "fold_index": args.fold_index,
+            "fixed_f": args.fixed_f,
+            "f_encoding_axis": args.f_encoding_axis,
             "label_balance": {
                 "class_0": int((y == 0).sum()),
                 "class_1": int((y == 1).sum()),
