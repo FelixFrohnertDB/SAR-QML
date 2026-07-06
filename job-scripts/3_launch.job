@@ -22,11 +22,11 @@ source /home/frohnertf/data1/githubRepos/SAR-QML/.venv/bin/activate
 # ── Experiment configuration ──────────────────────────────────────────────────
 
 ARGS=(
-    --n-samples 1000 
-    --run-name "e1" 
+    --n-samples 2000 
+    --run-name "e3new" 
     --n-qubits 2
     --show-progress  
-    --n-layers 2  
+    --n-layers 3  
     --n-epochs 500 
     --n-folds 5
     --fold-index "${SLURM_ARRAY_TASK_ID}"

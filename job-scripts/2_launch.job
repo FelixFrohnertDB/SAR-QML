@@ -24,17 +24,17 @@ source /home/frohnertf/data1/githubRepos/SAR-QML/.venv/bin/activate
 
 ARGS=(
     --n-samples 10000 
-    --run-name "e1" 
+    --run-name "e2new" 
     --n-qubits 2
     --show-progress  
-    --n-layers 8  
+    --n-layers 6  
     --n-epochs 500 
     --n-folds 5
     --fold-index "${SLURM_ARRAY_TASK_ID}"
     --readout-mode linear
     --lr 0.005
     --catalyst-batch-size 256
-    --quantum-init-scale 0.05
+    --quantum-init-scale 0.01
     --fixed-f
     --f-encoding-axis Z
 
