@@ -762,7 +762,6 @@ def teacher_student_dataset(
     n_samples: int,
     config: PQCConfig,
     seed: int,
-    threshold: float = 0.5,
     teacher_weight_init_scale: float = 1.0,
     use_soft_labels: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -777,9 +776,10 @@ def teacher_student_dataset(
     that the student must genuinely learn rather than accidentally matching at
     initialisation.
 
-    use_soft_labels=True returns raw teacher probabilities as targets. BCE handles
-    soft targets (y in [0,1]) naturally and removes label noise near the decision
-    boundary. Set to False to recover hard 0/1 labels via threshold.
+    Labels are balanced via median-threshold ranking of teacher probabilities,
+    so class counts are exactly 50/50 when n_samples is even (or differ by at
+    most one when odd). When use_soft_labels=True, soft targets are centered so
+    the median teacher score maps to 0.5 while preserving sample ordering.
     """
     seed_seq = np.random.SeedSequence(seed)
     rng_x, rng_f = [np.random.default_rng(s) for s in seed_seq.spawn(2)]
@@ -802,12 +802,19 @@ def teacher_student_dataset(
     teacher_weights = teacher.init_weights()
     probs = np.asarray(teacher.predict((x_data, f_data), teacher_weights), dtype=np.float64)
 
+    # Median-threshold ranking gives an exactly balanced hard-label split.
+    order = np.argsort(probs)
+    n_neg = n_samples // 2
+    hard_balanced = np.ones(n_samples, dtype=np.int64)
+    hard_balanced[order[:n_neg]] = 0
+
     if use_soft_labels:
-        # Soft labels: raw probabilities in [0, 1].  BCE handles these naturally and
-        # avoids injecting label noise near the teacher's decision boundary.
-        y = probs.astype(np.float64)
+        # Shift probabilities so the median score is centered at 0.5 while
+        # preserving monotonic ordering relative to the teacher outputs.
+        median_prob = float(np.median(probs))
+        y = np.clip(probs - median_prob + 0.5, 0.0, 1.0).astype(np.float64)
     else:
-        y = (probs > threshold).astype(np.int64)
+        y = hard_balanced
     return x_data, f_data, y
 
 

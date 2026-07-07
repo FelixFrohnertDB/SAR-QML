@@ -42,14 +42,14 @@ ARGS=(
     --n-epochs 500 
     --n-folds 5
     --fold-index "${FOLD_INDEX}"
-    --readout_mode linear
+    --readout_mode single
+    --hard-labels
     --catalyst-batch-size 256
     --quantum-init-scale 0.01
     --fixed-f
     --f-encoding-axis Z
     --train-size "${TRAIN_SIZE}"
     --val-size "${VAL_SIZE}"
-
 )
 
 echo "Running qubits=${N_QUBITS}, fold=${FOLD_INDEX}" 

@@ -15,7 +15,6 @@ from sar_qml.common import (
 
 def main() -> None:
     parser = make_common_parser("Experiment 1: Alignment ablation (teacher-student)")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Teacher label threshold (hard labels only)")
     parser.add_argument(
         "--teacher-weight-init-scale",
         type=float,
@@ -53,7 +52,6 @@ def main() -> None:
         n_samples=n_samples,
         config=config,
         seed=args.seed,
-        threshold=args.threshold,
         teacher_weight_init_scale=args.teacher_weight_init_scale,
         use_soft_labels=use_soft_labels,
     )
@@ -98,8 +96,8 @@ def main() -> None:
         "fixed_f": True,
         "f_encoding_axis": args.f_encoding_axis,
         "use_soft_labels": use_soft_labels,
+        "label_threshold_mode": "median_rank_balanced",
         "teacher_weight_init_scale": args.teacher_weight_init_scale,
-        "threshold": args.threshold,
         "label_balance": {
             "class_0": int((y_hard == 0).sum()),
             "class_1": int((y_hard == 1).sum()),
