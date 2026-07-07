@@ -6,6 +6,7 @@ from sar_qml.common import (
     make_experiment_dir,
     print_summary,
     raw_sar_synthetic_dataset,
+    required_dataset_size_for_fold_subsampling,
     run_paired_models,
     run_paired_models_single_fold,
     save_results_bundle,
@@ -13,7 +14,6 @@ from sar_qml.common import (
 
 def main() -> None:
     parser = make_common_parser("Experiment 3: Synthetic raw SAR classification")
-    parser.add_argument("--n-samples", type=int, default=500, help="Number of synthetic samples")
     parser.add_argument(
         "--noise-scale",
         type=float,
@@ -39,6 +39,14 @@ def main() -> None:
         raise ValueError("--n-qubits must be an even integer >= 2")
     if args.fold_index is not None and (args.fold_index < 1 or args.fold_index > args.n_folds):
         raise ValueError(f"--fold-index must be in [1, {args.n_folds}]")
+    if args.train_size is None or args.train_size <= 0:
+        raise ValueError("--train-size must be > 0")
+
+    n_samples = required_dataset_size_for_fold_subsampling(
+        n_folds=args.n_folds,
+        train_size=args.train_size,
+        val_size=args.val_size,
+    )
 
     config = config_from_args(args)
 
@@ -52,7 +60,7 @@ def main() -> None:
         raise ValueError("Experiment 3 currently expects --n-qubits in {2, 4, 6}")
 
     x_data, f_data, y = raw_sar_synthetic_dataset(
-        n_samples=args.n_samples,
+        n_samples=n_samples,
         n_qubits=args.n_qubits,
         seed=args.seed,
         noise_scale=args.noise_scale,
@@ -61,7 +69,14 @@ def main() -> None:
     )
 
     if args.fold_index is None:
-        payload = run_paired_models(config=config, x_data=x_data, f_data=f_data, y=y)
+        payload = run_paired_models(
+            config=config,
+            x_data=x_data,
+            f_data=f_data,
+            y=y,
+            train_size=args.train_size,
+            val_size=args.val_size,
+        )
     else:
         payload = run_paired_models_single_fold(
             config=config,
@@ -69,9 +84,13 @@ def main() -> None:
             f_data=f_data,
             y=y,
             fold_index=args.fold_index,
+            train_size=args.train_size,
+            val_size=args.val_size,
         )
 
-    out_dir = make_experiment_dir(args.output_root, "exp3_raw_sar_classification", run_name=args.run_name)
+    size_tag = f"tr{args.train_size or 'full'}_va{args.val_size if args.val_size and args.val_size > 0 else 'full'}"
+    run_name = f"{args.run_name}_{size_tag}" if args.run_name else size_tag
+    out_dir = make_experiment_dir(args.output_root, "exp3_raw_sar_classification", run_name=run_name)
 
     case_out_dir = out_dir / f"case_n{args.n_qubits}"
     if args.fold_index is not None:
@@ -85,7 +104,9 @@ def main() -> None:
         config,
         payload,
         metadata={
-            "n_samples": args.n_samples,
+            "n_samples_generated": n_samples,
+            "train_size": args.train_size,
+            "val_size": args.val_size,
             "n_qubits": args.n_qubits,
             "n_measurements": args.n_qubits // 2,
             "n_scene_positions": min(3, args.n_qubits // 2),

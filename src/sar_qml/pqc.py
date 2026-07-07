@@ -115,6 +115,10 @@ class PQCConfig:
     # RY, so a fixed f acts as a genuine, non-absorbable spectral hyperparameter.
     f_encoding_axis: str = "Y"
 
+    # Trainable single-qubit block used in every variational layer of BOTH models.
+    # Enforced as U3-style YZY decomposition: RY(t1) RZ(t2) RY(t3).
+    trainable_block: str = "yzy"
+
     # training
     n_epochs: int = 200
     learning_rate: float = 0.005  # Increased slightly for Adjoint
@@ -161,6 +165,12 @@ class PQCClassifier:
         self.max_double_layers = max(self.x_layers, self.f_layers)
         self.readout_dim = self._get_readout_dim()
 
+        # Enforce universal single-qubit trainable block: RY.RZ.RY (3 params).
+        self.trainable_block = getattr(self.config, "trainable_block", "yzy").lower()
+        if self.trainable_block != "yzy":
+            raise ValueError("trainable_block must be 'yzy'")
+        self.n_rot = 3
+
         # Device: "adjoint" is preferred for lightning.qubit
         self.dev = qml.device("lightning.qubit", wires=self.config.n_qubits)
 
@@ -178,8 +188,8 @@ class PQCClassifier:
 
     def _quantum_param_size(self) -> int:
         if self.use_double_reuploading:
-            return (self.x_layers + self.f_layers) * self.config.n_qubits
-        return self.x_layers * self.config.n_qubits
+            return (self.x_layers + self.f_layers) * self.config.n_qubits * self.n_rot
+        return self.x_layers * self.config.n_qubits * self.n_rot
 
     def _split_joint_weights(self, weights):
         if not self.use_linear_readout:
@@ -191,7 +201,7 @@ class PQCClassifier:
         readout_b = weights[q_size + self.readout_dim]
 
         if not self.use_double_reuploading:
-            q_weights = q_weights.reshape(self.x_layers, self.config.n_qubits)
+            q_weights = q_weights.reshape(self.x_layers, self.config.n_qubits, self.n_rot)
 
         return q_weights, readout_w, readout_b
 
@@ -213,12 +223,21 @@ class PQCClassifier:
 
     def variational_layer(self, w):
         """
-        w is shape (n_qubits,). 
-        If we are broadcasting data, w remains constant across the batch.
+        Trainable single-qubit block on every qubit + a ring entangler.
+
+        w is shape (n_qubits, n_rot). n_rot is 1 for the "ry"/"rz" single-rotation
+        blocks and 3 for the "yzy" universal block. If we are broadcasting data,
+        w remains constant across the batch.
+
+        Enforced block: RY(w[i,0]) RZ(w[i,1]) RY(w[i,2]) (universal SU(2)).
+        The RY boundaries do not commute with fixed RZ(f) encoding, preserving
+        the spectral hyperparameter as non-absorbable.
         """
         for i in range(self.config.n_qubits):
-            qml.RY(w[i], wires=i)
-        
+            qml.RY(w[i, 0], wires=i)
+            qml.RZ(w[i, 1], wires=i)
+            qml.RY(w[i, 2], wires=i)
+
         # Efficient Ring Entangler
         for i in range(self.config.n_qubits - 1):
             qml.CNOT(wires=[i, i + 1])
@@ -250,8 +269,10 @@ class PQCClassifier:
             remaining f_layers * n_qubits are f-branch weights.
         """
         nq = self.config.n_qubits
-        wx = weights[: self.x_layers * nq].reshape(self.x_layers, nq)
-        wf = weights[self.x_layers * nq :].reshape(self.f_layers, nq)
+        nr = self.n_rot
+        split = self.x_layers * nq * nr
+        wx = weights[:split].reshape(self.x_layers, nq, nr)
+        wf = weights[split:].reshape(self.f_layers, nq, nr)
         f_axis = getattr(self.config, "f_encoding_axis", "Y")
         for l in range(self.max_double_layers):
             if l < self.x_layers:
@@ -393,11 +414,11 @@ class PQCClassifier:
             return jnp.concatenate([quantum_weights, readout_w, readout_b], axis=0)
 
         if self.use_double_reuploading:
-            # Flat 1D: [x_layers * n_qubits] x-weights then [f_layers * n_qubits] f-weights.
-            n_params = (self.x_layers + self.f_layers) * self.config.n_qubits
+            # Flat 1D: [x_layers*n_qubits*n_rot] x-weights then [f_layers*n_qubits*n_rot] f-weights.
+            n_params = (self.x_layers + self.f_layers) * self.config.n_qubits * self.n_rot
             return quantum_scale * jax.random.normal(key, (n_params,))
         else:
-            shape = (self.x_layers, self.config.n_qubits)
+            shape = (self.x_layers, self.config.n_qubits, self.n_rot)
             return quantum_scale * jax.random.normal(key, shape)
 
     def get_optimizer(self):
@@ -446,7 +467,7 @@ class PQCClassifier:
             self.use_linear_readout,
             self._quantum_param_size(),
             self.readout_dim,
-            (self.x_layers, self.config.n_qubits),
+            (self.x_layers, self.config.n_qubits, self.n_rot),
         )
 
     def _make_jax_fullbatch_step(self):

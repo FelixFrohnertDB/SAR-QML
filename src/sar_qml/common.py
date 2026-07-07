@@ -5,10 +5,11 @@ import csv
 import json
 from dataclasses import asdict
 from datetime import datetime
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 import numpy as np
 from sar_qml.pqc import PQCClassifier, PQCConfig
 
@@ -34,6 +35,24 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--n-epochs", type=int, default=150, help="Training epochs")
     parser.add_argument("--n-folds", type=int, default=5, help="Cross-validation folds")
+    parser.add_argument(
+        "--train-size",
+        type=int,
+        default=None,
+        help=(
+            "Optional number of training samples to use per fold. "
+            "When unset, use the full fold training split."
+        ),
+    )
+    parser.add_argument(
+        "--val-size",
+        type=int,
+        default=1000,
+        help=(
+            "Number of validation samples to use per fold. "
+            "Set <=0 to disable subsampling and use full fold validation split."
+        ),
+    )
     parser.add_argument(
         "--eval-every",
         type=int,
@@ -104,6 +123,17 @@ def make_common_parser(description: str) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--trainable-block",
+        type=str,
+        default="yzy",
+        choices=["yzy"],
+        help=(
+            "Trainable single-qubit block used in every variational layer of BOTH "
+            "models. 'yzy' = universal RY.RZ.RY block (3 params/qubit) whose RY boundaries "
+            "keep a fixed RZ(f) encoding non-absorbable; this is the enforced default."
+        ),
+    )
+    parser.add_argument(
         "--init-scale-mode",
         type=str,
         default="system",
@@ -140,6 +170,38 @@ def timestamp_slug() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
 
+def required_dataset_size_for_fold_subsampling(
+    n_folds: int,
+    train_size: Optional[int],
+    val_size: Optional[int],
+    safety_margin: float = 0.05,
+    minimum_padding: int = 20,
+) -> int:
+    """Compute a practical dataset size so each CV fold can be subsampled safely.
+
+    For K-fold CV, each fold has about N/K validation samples and N*(K-1)/K
+    training samples. This helper inverts those relations and adds a small
+    padding to reduce failures from integer rounding and class stratification.
+    """
+    if n_folds < 2:
+        raise ValueError("n_folds must be >= 2")
+
+    needed_for_val = 0
+    if val_size is not None and val_size > 0:
+        needed_for_val = int(val_size) * int(n_folds)
+
+    needed_for_train = 0
+    if train_size is not None and train_size > 0:
+        needed_for_train = int(math.ceil(train_size * n_folds / (n_folds - 1)))
+
+    base = max(needed_for_train, needed_for_val)
+    if base <= 0:
+        return 0
+
+    padding = max(int(math.ceil(base * safety_margin)), int(minimum_padding))
+    return base + padding
+
+
 def make_experiment_dir(output_root: str, experiment_name: str, run_name: Optional[str] = None) -> Path:
     name = run_name or timestamp_slug()
     out_dir = Path(output_root) / experiment_name / name
@@ -169,6 +231,7 @@ def config_from_args(args: argparse.Namespace) -> PQCConfig:
         readout_mode=args.readout_mode,
         readout_wires=args.readout_wires,
         f_encoding_axis=getattr(args, "f_encoding_axis", "Y"),
+        trainable_block=getattr(args, "trainable_block", "yzy"),
     )
 
 
@@ -358,6 +421,104 @@ def linear_mnudft_dataset(
     return x_data, f_data, y
 
 
+def mnudft_teacher_dataset(
+    n_samples: int,
+    n_positions: int,
+    n_frequencies: int,
+    seed: int,
+    noise_scale: float = 0.0,
+    margin: float = 0.2,
+    fixed_f: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """MNUDFT teacher with a KNOWN analytic decision function.
+
+    Identical data-generating process to ``linear_mnudft_dataset`` (same ring
+    geometry, same complex spectral separator, same interleaved f-encoding), but
+    it ALSO returns a ``teacher`` spec so downstream analysis can compute the
+    exact reference decision function and its spectrum:
+
+        s*(x; f) = Re( sum_k w_k * sum_d x_d * exp(-2 pi i f_k . p_d) )
+
+    with complex weights ``w``, 2-D positions ``p`` (unit ring), and — under
+    ``fixed_f`` — the single shared query configuration ``f_true`` used to label
+    every sample. The frequency vector fed to the circuit is the interleaved
+    ``[fx0, fy0, fx1, fy1, ...]`` (length ``2 * n_frequencies``) with
+    ``fx_k = fy_k`` (scalar-per-frequency), matching ``linear_mnudft_dataset``.
+
+    Returns ``(x_data, f_data, y, teacher)`` where ``teacher`` holds
+    ``w`` (complex), ``positions`` (n_positions, 2), ``f_true`` (or None),
+    ``scores``, ``threshold`` and bookkeeping fields. Use it with the analytic
+    helpers in :mod:`sar_qml.spectral` to obtain the teacher's Fourier
+    fingerprint and to measure how well a trained model recovers it.
+    """
+    seed_seq = np.random.SeedSequence(seed)
+    rng_task, rng_x, rng_f, rng_noise = [np.random.default_rng(s) for s in seed_seq.spawn(4)]
+
+    shared_f_pairs = None
+    f_true_flat = None
+    if fixed_f:
+        f_vals0 = rng_f.uniform(low=-1.0, high=1.0, size=n_frequencies)
+        shared_f_pairs = np.stack([f_vals0, f_vals0], axis=1)
+        f_true_flat = np.zeros(2 * n_frequencies)
+        f_true_flat[0::2] = shared_f_pairs[:, 0]
+        f_true_flat[1::2] = shared_f_pairs[:, 1]
+
+    angles = np.linspace(0.0, 2.0 * np.pi, n_positions, endpoint=False)
+    positions = np.stack([np.cos(angles), np.sin(angles)], axis=1).astype(np.float64)
+
+    w = rng_task.normal(size=n_frequencies) + 1j * rng_task.normal(size=n_frequencies)
+
+    x_list, f_list, score_list = [], [], []
+    while len(x_list) < n_samples:
+        x = rng_x.normal(size=n_positions)
+        x /= np.max(np.abs(x)) + 1e-12
+
+        if shared_f_pairs is not None:
+            f_pairs = shared_f_pairs
+        else:
+            f_vals = rng_f.uniform(low=-1.0, high=1.0, size=n_frequencies)
+            f_pairs = np.stack([f_vals, f_vals], axis=1)
+
+        X = np.zeros(n_frequencies, dtype=np.complex128)
+        for k in range(n_frequencies):
+            phase = 2.0 * np.pi * (positions @ f_pairs[k])
+            X[k] = np.sum(x * np.exp(-1j * phase))
+
+        score = np.real(np.sum(w * X))
+        if noise_scale > 0.0:
+            score += noise_scale * rng_noise.normal()
+
+        if np.abs(score) >= margin:
+            x_list.append(x.astype(np.float64))
+            f_flat = np.zeros(2 * n_frequencies)
+            f_flat[0::2] = f_pairs[:, 0]
+            f_flat[1::2] = f_pairs[:, 1]
+            f_list.append(f_flat.astype(np.float64))
+            score_list.append(score)
+
+    x_data = np.array(x_list, dtype=np.float64)
+    f_data = np.array(f_list, dtype=np.float64)
+    scores = np.array(score_list, dtype=np.float64)
+
+    threshold = float(np.median(scores))
+    y = (scores > threshold).astype(np.int64)
+
+    teacher = {
+        "w_real": np.real(w).astype(np.float64),
+        "w_imag": np.imag(w).astype(np.float64),
+        "positions": positions,
+        "n_positions": int(n_positions),
+        "n_frequencies": int(n_frequencies),
+        "threshold": threshold,
+        "scores": scores,
+        "fixed_f": bool(fixed_f),
+        "f_true_flat": f_true_flat,  # interleaved [fx0,fy0,...] or None
+        "margin": float(margin),
+        "noise_scale": float(noise_scale),
+    }
+    return x_data, f_data, y, teacher
+
+
 def raw_sar_synthetic_dataset(
     n_samples: int,
     n_qubits: int,
@@ -521,6 +682,82 @@ def simulate_reflector_dataset(
     return x_data.astype(np.float64), f_data.astype(np.float64), y
 
 
+# def teacher_student_dataset(
+#     n_samples: int,
+#     config: PQCConfig,
+#     seed: int,
+#     threshold: float = 0.5,
+#     teacher_weight_init_scale: float = 1.0,
+#     use_soft_labels: bool = True,
+#     fixed_f: bool = False,
+# ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+#     """Generate labels from a fixed aligned teacher model with SAR-like x/f semantics.
+
+#     x_data emulates flattened reflectivity descriptors (derived from synthetic complex returns),
+#     while f_data is sampled as real-valued probing-frequency vectors.
+
+#     teacher_weight_init_scale should be significantly larger than the student's
+#     weight_init_scale (default 0.01) so the teacher encodes a non-trivial function
+#     that the student must genuinely learn rather than accidentally matching at
+#     initialisation.
+
+#     use_soft_labels=True returns raw teacher probabilities as targets. BCE handles
+#     soft targets (y in [0,1]) naturally and removes label noise near the decision
+#     boundary. Set to False to recover hard 0/1 labels via threshold.
+#     """
+#     seed_seq = np.random.SeedSequence(seed)
+#     rng_x, rng_f = [np.random.default_rng(s) for s in seed_seq.spawn(2)]
+
+#     # Build structured reflectivity-style features from synthetic complex returns,
+#     # then compress to the model input dimension.
+#     latent_dim = max(4 * config.n_qubits, 16)
+#     refl_real = rng_x.normal(loc=0.0, scale=1.0, size=(n_samples, latent_dim))
+#     refl_imag = rng_x.normal(loc=0.0, scale=1.0, size=(n_samples, latent_dim))
+#     magnitude = np.sqrt(refl_real**2 + refl_imag**2)
+#     phase = np.arctan2(refl_imag, refl_real)
+#     reflectivity_features = np.concatenate([magnitude, phase], axis=1)
+#     x_data = compress_ordered_features(reflectivity_features, config.n_qubits)
+#     x_data = (x_data - x_data.mean(axis=0)) / (x_data.std(axis=0) + 1e-8)
+
+#     # Real probing frequencies in R: monotone grids with sample-specific bandwidth/offset.
+#     if config.n_qubits == 1:
+#         base_axis = np.array([0.0], dtype=np.float64)
+#     else:
+#         base_axis = np.linspace(0.0, 1.0, config.n_qubits, dtype=np.float64)
+
+#     if fixed_f:
+#         # f as a dataset-level hyperparameter: one probing-frequency vector shared
+#         # by all samples, so the teacher's label depends only on x.
+#         start_freq = rng_f.uniform(0.15, 0.9, size=(1, 1))
+#         bandwidth = rng_f.uniform(0.2, 1.4, size=(1, 1))
+#         f_row = 2.0 * np.pi * (start_freq + bandwidth * base_axis[None, :])
+#         f_data = np.tile(f_row, (n_samples, 1)).astype(np.float64)
+#     else:
+#         start_freq = rng_f.uniform(0.15, 0.9, size=(n_samples, 1))
+#         bandwidth = rng_f.uniform(0.2, 1.4, size=(n_samples, 1))
+#         f_data = 2.0 * np.pi * (start_freq + bandwidth * base_axis[None, :])
+#         f_data += 0.03 * rng_f.normal(size=f_data.shape)
+#         f_data = f_data.astype(np.float64)
+
+#     # Teacher uses a dedicated seed offset so its weights are independent of the
+#     # student's initialisation seed, and a larger init scale so it encodes a
+#     # genuinely non-trivial function.
+#     teacher_config = PQCConfig(
+#         **{k: v for k, v in config.__dict__.items() if k != "weight_init_scale"},
+#         weight_init_scale=teacher_weight_init_scale,
+#     )
+#     teacher = PQCClassifier(teacher_config, use_double_reuploading=True)
+#     teacher_weights = teacher.init_weights()
+#     probs = np.asarray(teacher.predict((x_data, f_data), teacher_weights), dtype=np.float64)
+
+#     if use_soft_labels:
+#         # Soft labels: raw probabilities in [0, 1].  BCE handles these naturally and
+#         # avoids injecting label noise near the teacher's decision boundary.
+#         y = probs.astype(np.float64)
+#     else:
+#         y = (probs > threshold).astype(np.int64)
+#     return x_data, f_data, y
+
 def teacher_student_dataset(
     n_samples: int,
     config: PQCConfig,
@@ -528,12 +765,12 @@ def teacher_student_dataset(
     threshold: float = 0.5,
     teacher_weight_init_scale: float = 1.0,
     use_soft_labels: bool = True,
-    fixed_f: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Generate labels from a fixed aligned teacher model with SAR-like x/f semantics.
+    """Generate labels from a fixed aligned teacher model with simplified x/f semantics.
 
-    x_data emulates flattened reflectivity descriptors (derived from synthetic complex returns),
-    while f_data is sampled as real-valued probing-frequency vectors.
+    x_data is sampled directly from N(0, 1).
+    f_data is always a dataset-level fixed vector drawn with the provided seed,
+    non-uniformly distributed in [-1, 1], and shared across all samples.
 
     teacher_weight_init_scale should be significantly larger than the student's
     weight_init_scale (default 0.01) so the teacher encodes a non-trivial function
@@ -547,36 +784,12 @@ def teacher_student_dataset(
     seed_seq = np.random.SeedSequence(seed)
     rng_x, rng_f = [np.random.default_rng(s) for s in seed_seq.spawn(2)]
 
-    # Build structured reflectivity-style features from synthetic complex returns,
-    # then compress to the model input dimension.
-    latent_dim = max(4 * config.n_qubits, 16)
-    refl_real = rng_x.normal(loc=0.0, scale=1.0, size=(n_samples, latent_dim))
-    refl_imag = rng_x.normal(loc=0.0, scale=1.0, size=(n_samples, latent_dim))
-    magnitude = np.sqrt(refl_real**2 + refl_imag**2)
-    phase = np.arctan2(refl_imag, refl_real)
-    reflectivity_features = np.concatenate([magnitude, phase], axis=1)
-    x_data = compress_ordered_features(reflectivity_features, config.n_qubits)
-    x_data = (x_data - x_data.mean(axis=0)) / (x_data.std(axis=0) + 1e-8)
+    x_data = rng_x.normal(loc=0.0, scale=1.0, size=(n_samples, config.n_qubits)).astype(np.float64)
 
-    # Real probing frequencies in R: monotone grids with sample-specific bandwidth/offset.
-    if config.n_qubits == 1:
-        base_axis = np.array([0.0], dtype=np.float64)
-    else:
-        base_axis = np.linspace(0.0, 1.0, config.n_qubits, dtype=np.float64)
-
-    if fixed_f:
-        # f as a dataset-level hyperparameter: one probing-frequency vector shared
-        # by all samples, so the teacher's label depends only on x.
-        start_freq = rng_f.uniform(0.15, 0.9, size=(1, 1))
-        bandwidth = rng_f.uniform(0.2, 1.4, size=(1, 1))
-        f_row = 2.0 * np.pi * (start_freq + bandwidth * base_axis[None, :])
-        f_data = np.tile(f_row, (n_samples, 1)).astype(np.float64)
-    else:
-        start_freq = rng_f.uniform(0.15, 0.9, size=(n_samples, 1))
-        bandwidth = rng_f.uniform(0.2, 1.4, size=(n_samples, 1))
-        f_data = 2.0 * np.pi * (start_freq + bandwidth * base_axis[None, :])
-        f_data += 0.03 * rng_f.normal(size=f_data.shape)
-        f_data = f_data.astype(np.float64)
+    # Fixed, seeded and non-uniform in [-1, 1]. tanh(N(0,1)) gives a smooth,
+    # center-heavy non-uniform distribution with strict bounds.
+    f_row = np.tanh(rng_f.normal(loc=0.0, scale=1.0, size=(1, config.n_qubits))).astype(np.float64)
+    f_data = np.tile(f_row, (n_samples, 1))
 
     # Teacher uses a dedicated seed offset so its weights are independent of the
     # student's initialisation seed, and a larger init scale so it encodes a
@@ -651,12 +864,46 @@ def _train_single_fold(
     return np.asarray(best_weights), history, float(best_val_acc)
 
 
+def _subsample_indices(
+    indices: np.ndarray,
+    y_strat: np.ndarray,
+    target_size: Optional[int],
+    seed: int,
+    split_name: str,
+) -> np.ndarray:
+    if target_size is None or target_size <= 0:
+        return np.asarray(indices)
+
+    indices = np.asarray(indices)
+    if target_size > len(indices):
+        raise ValueError(
+            f"Requested {split_name}_size={target_size}, but fold has only {len(indices)} "
+            f"{split_name} samples. Increase --n-samples or reduce --n-folds/{split_name}_size."
+        )
+    if target_size == len(indices):
+        return indices
+
+    labels = np.asarray(y_strat)[indices]
+    unique = np.unique(labels)
+
+    # Use stratified subsampling whenever possible to preserve class balance.
+    if len(unique) >= 2 and target_size >= len(unique):
+        splitter = StratifiedShuffleSplit(n_splits=1, train_size=target_size, random_state=seed)
+        rel_idx, _ = next(splitter.split(np.zeros(len(indices)), labels))
+        return indices[np.asarray(rel_idx)]
+
+    rng = np.random.default_rng(seed)
+    return np.asarray(rng.choice(indices, size=target_size, replace=False))
+
+
 def run_crossval(
     config: PQCConfig,
     x_data: np.ndarray,
     y: np.ndarray,
     f_data: Optional[np.ndarray] = None,
     use_double_reuploading: bool = False,
+    train_size: Optional[int] = None,
+    val_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     # StratifiedKFold requires integer class labels; threshold soft targets for splitting only.
     y_strat = (np.asarray(y) > 0.5).astype(int)
@@ -666,6 +913,21 @@ def run_crossval(
     fold_weights: List[np.ndarray] = []
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(x_data, y_strat), start=1):
+        train_idx = _subsample_indices(
+            train_idx,
+            y_strat=y_strat,
+            target_size=train_size,
+            seed=config.random_state + 1000 * fold + 11,
+            split_name="train",
+        )
+        val_idx = _subsample_indices(
+            val_idx,
+            y_strat=y_strat,
+            target_size=val_size,
+            seed=config.random_state + 1000 * fold + 29,
+            split_name="val",
+        )
+
         y_train = y[train_idx]
         y_val = y[val_idx]
 
@@ -717,6 +979,8 @@ def run_crossval_single_fold(
     fold_index: int,
     f_data: Optional[np.ndarray] = None,
     use_double_reuploading: bool = False,
+    train_size: Optional[int] = None,
+    val_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run exactly one StratifiedKFold split (1-based fold_index)."""
     if fold_index < 1 or fold_index > config.n_folds:
@@ -726,6 +990,20 @@ def run_crossval_single_fold(
     kf = StratifiedKFold(n_splits=config.n_folds, shuffle=True, random_state=config.random_state)
     splits = list(kf.split(x_data, y_strat))
     train_idx, val_idx = splits[fold_index - 1]
+    train_idx = _subsample_indices(
+        train_idx,
+        y_strat=y_strat,
+        target_size=train_size,
+        seed=config.random_state + 1000 * fold_index + 11,
+        split_name="train",
+    )
+    val_idx = _subsample_indices(
+        val_idx,
+        y_strat=y_strat,
+        target_size=val_size,
+        seed=config.random_state + 1000 * fold_index + 29,
+        split_name="val",
+    )
 
     y_train = y[train_idx]
     y_val = y[val_idx]
@@ -770,6 +1048,8 @@ def run_paired_models(
     x_data: np.ndarray,
     f_data: np.ndarray,
     y: np.ndarray,
+    train_size: Optional[int] = None,
+    val_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     # The aligned circuit interleaves x-blocks and f-blocks, so its total number of
     # variational sub-layers is n_x_layers + n_f_layers.  To keep the parameter count
@@ -786,6 +1066,8 @@ def run_paired_models(
         f_data=f_data,
         y=y,
         use_double_reuploading=True,
+        train_size=train_size,
+        val_size=val_size,
     )
     # Fair baseline for alignment tests: standard model gets only x input,
     # with total depth matched to aligned (x_depth + f_depth).
@@ -795,6 +1077,8 @@ def run_paired_models(
         f_data=None,
         y=y,
         use_double_reuploading=False,
+        train_size=train_size,
+        val_size=val_size,
     )
     return {
         "aligned": aligned,
@@ -814,6 +1098,8 @@ def run_paired_models_single_fold(
     f_data: np.ndarray,
     y: np.ndarray,
     fold_index: int,
+    train_size: Optional[int] = None,
+    val_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run aligned/standard comparison on one fixed fold only."""
     from dataclasses import replace as dc_replace
@@ -830,6 +1116,8 @@ def run_paired_models_single_fold(
         y=y,
         fold_index=fold_index,
         use_double_reuploading=True,
+        train_size=train_size,
+        val_size=val_size,
     )
     standard = run_crossval_single_fold(
         config=standard_config,
@@ -838,6 +1126,8 @@ def run_paired_models_single_fold(
         y=y,
         fold_index=fold_index,
         use_double_reuploading=False,
+        train_size=train_size,
+        val_size=val_size,
     )
     return {
         "aligned": aligned,
