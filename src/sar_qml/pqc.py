@@ -109,11 +109,31 @@ class PQCConfig:
     n_f_layers: Optional[int] = None
 
     # Rotation axis used to encode the (fixed) frequency hyperparameter f in the
-    # aligned/double circuit's f-branch. "Y" reproduces the original additive
-    # scheme in which a constant f is absorbed into the adjacent trainable RY.
-    # "Z" (or "X") encodes f on an axis that does NOT commute with the trainable
-    # RY, so a fixed f acts as a genuine, non-absorbable spectral hyperparameter.
+    # aligned/double circuit's f-branch, when f_encoding_mode == "product".
+    #
+    # WARNING.  Changing this axis does NOT make a constant f non-absorbable.
+    # With the universal (yzy) trainable block, B_l is all of SU(2) per qubit, so
+    # for ANY product encoding E(f) = prod_i R_axis(f_i) there exists w' with
+    #     B_l(w') = B_l(w) E(f)        (residual ~2e-16, verified numerically)
+    # i.e. the absorption condition B_l E(f) subset B_l of the paper's absorption
+    # proposition holds identically on "Y", "Z" and "X".  The hypothesis classes
+    # H(f) and H(0) are then EQUAL and no expressivity effect can exist.
+    # Only the parameter-induced function PRIOR can differ (the trainable weights
+    # are Gaussian, not Haar, so absorption is not measure preserving).
+    # For a class-level effect use f_encoding_mode="zz_ring" below.
     f_encoding_axis: str = "Y"
+
+    # Query-encoding family E_f.
+    #   "product"  -- prod_i R_axis(f_i).  Local, hence absorbable by the product
+    #                 trainable blocks (see WARNING above): prior-level effects
+    #                 only.
+    #   "zz_ring"  -- prod_i exp(-i f_i Z_i Z_{i+1} / 2) on a ring.  ENTANGLING,
+    #                 therefore NOT absorbable by single-qubit blocks, while the
+    #                 generators still commute within the layer (so the spectral
+    #                 separation proposition and Omega^(f) are unchanged).
+    #                 This is the setting in which a fixed f changes the
+    #                 hypothesis class itself.
+    f_encoding_mode: str = "product"
 
     # Trainable single-qubit block used in every variational layer of BOTH models.
     # Enforced as U3-style YZY decomposition: RY(t1) RZ(t2) RY(t3).
@@ -221,6 +241,29 @@ class PQCClassifier:
         """
         qml.AngleEmbedding(x, wires=range(self.config.n_qubits), rotation=rotation)
 
+    def query_encoding(self, f):
+        """Apply the query-encoding family E_f selected by config.f_encoding_mode.
+
+        "product": prod_i R_axis(f_i)  -- local, absorbable by product blocks.
+        "zz_ring": prod_i exp(-i f_i Z_i Z_{i+1}/2) -- entangling, NOT absorbable
+                   by single-qubit blocks.  Generators [Z_i Z_{i+1}] all commute,
+                   so the layer still admits a joint eigenbasis and Omega^(f) is
+                   the same eigenvalue-difference set as the product scheme.
+        """
+        nq = self.config.n_qubits
+        mode = getattr(self.config, "f_encoding_mode", "product")
+        if mode == "product":
+            self.angle_encoding(f, rotation=getattr(self.config, "f_encoding_axis", "Y"))
+            return
+        if mode != "zz_ring":
+            raise ValueError(f"unknown f_encoding_mode {mode!r}")
+        if nq < 2:
+            raise ValueError("zz_ring requires n_qubits >= 2")
+        # IsingZZ(phi) = exp(-i phi Z Z / 2); broadcasts over a batch of f.
+        pairs = [(i, (i + 1) % nq) for i in range(nq)] if nq > 2 else [(0, 1)]
+        for i, j in pairs:
+            qml.IsingZZ(f[..., i], wires=[i, j])
+
     def variational_layer(self, w):
         """
         Trainable single-qubit block on every qubit + a ring entangler.
@@ -279,7 +322,7 @@ class PQCClassifier:
                 self.angle_encoding(inputs_x, rotation="Y")
                 self.variational_layer(wx[l])
             if l < self.f_layers:
-                self.angle_encoding(inputs_f, rotation=f_axis)
+                self.query_encoding(inputs_f)
                 self.variational_layer(wf[l])
         if self.use_linear_readout:
             if readout_w is not None:
@@ -580,7 +623,12 @@ class PQCClassifier:
     # ------------------------------
     # Training
     # ------------------------------
-    def train_fold(self, train_data, y_train, val_data, y_val, fold_num):
+    def train_fold(self, 
+                   train_data, 
+                   y_train, 
+                   val_data, 
+                   y_val, 
+                   fold_num):
         # Deterministic seed per fold
         fold_seed = self.config.random_state + fold_num
         key = jax.random.PRNGKey(fold_seed)
