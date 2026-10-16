@@ -1,12 +1,17 @@
-*npy
-*csv
-*pyc
-*json
-*txt
-*tex
-*md
-PKG-INFO
-rm/*
-*.npz
-*.png
-*.pdf
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local scratch
+rm/
