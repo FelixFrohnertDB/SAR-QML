@@ -1,0 +1,173 @@
+{
+  "experiment_version": "fixed-query-v3-profile-bootstrap",
+  "profile": "paper",
+  "register_qubits": 3,
+  "layers": 2,
+  "n_variational_parameters": 48,
+  "query_bound": 3.9269908169872414,
+  "geometry": {
+    "name": "baseline",
+    "carrier_hz": 10000000000.0,
+    "range_step_hz": 5000000.0,
+    "kx_center": 125.0,
+    "kx_step": 1.25,
+    "reference_range": 3700.0,
+    "kr_center": 419.16900439033634,
+    "delta_kr": 0.2095845021951682,
+    "kappa_xr": 0.0008180938101814859,
+    "mixed_scale": 0.00021432472994479393,
+    "f_geometry": 0.7930015007957375,
+    "bilinear_coefficient": 1.0001606506933614,
+    "bilinear_r2": 0.9998315707688793
+  },
+  "profile_geometries": [
+    {
+      "name": "high carrier",
+      "carrier_hz": 14000000000.0,
+      "range_step_hz": 5000000.0,
+      "kx_center": 125.0,
+      "kx_step": 1.25,
+      "reference_range": 3700.0,
+      "f_geometry": 0.37722034333071275,
+      "bilinear_r2": 0.9998688835138438
+    },
+    {
+      "name": "low squint",
+      "carrier_hz": 10000000000.0,
+      "range_step_hz": 5000000.0,
+      "kx_center": 80.0,
+      "kx_step": 1.25,
+      "reference_range": 3700.0,
+      "f_geometry": 0.4666103850418687,
+      "bilinear_r2": 0.9996963320319707
+    },
+    {
+      "name": "baseline",
+      "carrier_hz": 10000000000.0,
+      "range_step_hz": 5000000.0,
+      "kx_center": 125.0,
+      "kx_step": 1.25,
+      "reference_range": 3700.0,
+      "f_geometry": 0.7930015007957375,
+      "bilinear_r2": 0.9998315707688793
+    },
+    {
+      "name": "far range",
+      "carrier_hz": 10000000000.0,
+      "range_step_hz": 5000000.0,
+      "kx_center": 125.0,
+      "kx_step": 1.25,
+      "reference_range": 4800.0,
+      "f_geometry": 1.0287587037350108,
+      "bilinear_r2": 0.9998315707688793
+    },
+    {
+      "name": "high squint",
+      "carrier_hz": 10000000000.0,
+      "range_step_hz": 5000000.0,
+      "kx_center": 180.0,
+      "kx_step": 1.25,
+      "reference_range": 3700.0,
+      "f_geometry": 1.3481903586672668,
+      "bilinear_r2": 0.9998623741505958
+    },
+    {
+      "name": "high bandwidth",
+      "carrier_hz": 10000000000.0,
+      "range_step_hz": 9000000.0,
+      "kx_center": 125.0,
+      "kx_step": 1.25,
+      "reference_range": 3700.0,
+      "f_geometry": 1.4274027014323274,
+      "bilinear_r2": 0.999828624880151
+    },
+    {
+      "name": "squint + bandwidth",
+      "carrier_hz": 10000000000.0,
+      "range_step_hz": 7000000.0,
+      "kx_center": 180.0,
+      "kx_step": 1.25,
+      "reference_range": 3700.0,
+      "f_geometry": 1.8874665021341734,
+      "bilinear_r2": 0.9998606508243473
+    },
+    {
+      "name": "carrier + bandwidth",
+      "carrier_hz": 14000000000.0,
+      "range_step_hz": 9000000.0,
+      "kx_center": 125.0,
+      "kx_step": 1.25,
+      "reference_range": 3700.0,
+      "f_geometry": 0.6789966179952829,
+      "bilinear_r2": 0.9998675715938634
+    }
+  ],
+  "snr_db": 10.0,
+  "n_clutter": 4,
+  "clutter_rms": 1.25,
+  "azimuth_subcell_jitter": 0.48,
+  "sensor_z_phases": [
+    1.5,
+    -1.7,
+    1.0
+  ],
+  "clutter_range_ratio": [
+    0.45,
+    1.55
+  ],
+  "profile_settings": {
+    "n_draws": 12,
+    "geometry_profile_draws": 4,
+    "geometry_profile_points": 15,
+    "n_train_scan": 512,
+    "n_validation": 1024,
+    "n_test": 4096,
+    "efficiency_ns": [
+      32,
+      64,
+      128,
+      256,
+      512
+    ],
+    "n_restarts": 6,
+    "adam_steps": 700,
+    "adam_lr": 0.04,
+    "scan_points": 15,
+    "bootstrap_samples": 5000
+  },
+  "scan_ratios": [
+    -1.5,
+    -1.25,
+    -1.0,
+    -0.75,
+    -0.5,
+    -0.25,
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0
+  ],
+  "profile_query_ratios": [
+    -1.5,
+    -1.25,
+    -1.0,
+    -0.75,
+    -0.5,
+    -0.25,
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0
+  ],
+  "base_seed": 271828
+}

@@ -1,0 +1,14 @@
+{
+  "A_star": 0.9410589321387397,
+  "global_peak_scale": 0.8125,
+  "global_peak_accuracy": 0.9446506836087648,
+  "accuracy_drop": 0.01,
+  "threshold": 0.9310589321387397,
+  "delta_tolerance_rad": 0.14293334123753443,
+  "status": "resolved",
+  "bootstrap_lower95": 0.10596165791718,
+  "bootstrap_upper95": 0.23289495531863774,
+  "bootstrap_censoring_counts": {
+    "resolved": 5000
+  }
+}

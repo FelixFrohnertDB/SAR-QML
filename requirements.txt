@@ -1,7 +1,6 @@
 # Tested with Python 3.12.
 jax==0.7.1
 jaxlib==0.7.1
-optax==0.2.8
 numpy==2.3.4
 scipy==1.16.3
 pandas==2.3.3

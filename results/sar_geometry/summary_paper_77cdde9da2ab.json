@@ -1,0 +1,70 @@
+{
+  "run_id": "77cdde9da2ab",
+  "geometry": {
+    "carrier_hz": 10000000000.0,
+    "range_frequency_step_hz": 5000000.0,
+    "kr_center_rad_per_m": 419.16900439033634,
+    "delta_kr_rad_per_m": 0.2095845021951682,
+    "kx_center_rad_per_m": 125.0,
+    "delta_kx_rad_per_m": 1.25,
+    "reference_range_m": 3700.0,
+    "mixed_derivative_m": 0.0008180938101814859,
+    "mixed_scale_per_m": 0.00021432472994479393,
+    "f_star_rad": 0.7930015007957375,
+    "f_star_over_cell_width": 1.0096808698474655,
+    "bilinear_coefficient": 1.0001606506933614,
+    "bilinear_r2": 0.9998315707688793,
+    "maximum_aligned_residual_rad": 0.1389945022270041
+  },
+  "validity": {
+    "mixed derivative relative error": 4.065471093369447e-06,
+    "interaction row mean": 3.315263619185771e-10,
+    "interaction column mean": 4.6413717313953384e-10,
+    "bilinear coefficient": 1.0001606506933614,
+    "bilinear R2": 0.9998315707688793,
+    "aligned residual max rad": 0.1389945022270041,
+    "RZZ decomposition": 8.743006318923108e-16,
+    "two-register RZZ gates": 9,
+    "zero residual identity": 0.0,
+    "sensor calibration exactness": 2.220446049250313e-16,
+    "trace error": 2.220446049250313e-16,
+    "Hermiticity error": 0.0,
+    "minimum eigenvalue": 2.2720166777288323e-06,
+    "balanced declared sizes": true,
+    "clean purity exact": 1.0,
+    "clean purity compact": 0.9941896141042644,
+    "clean purity wrong": 0.22378347749897146,
+    "clean purity none": 0.12587049108257437,
+    "probe accuracy aligned": 0.80375,
+    "probe accuracy wrong": 0.22,
+    "probe accuracy none": 0.11875
+  },
+  "key_results": {
+    "scan_peak_f_over_fstar": 1.0,
+    "recovery_rmse_rad": 0.0018567809000512951,
+    "exact_query_qft_reference": 0.83126,
+    "compact_query_qft_reference": 0.83152,
+    "aligned_minus_wrong_at_largest_N": {
+      "mean": 0.6124,
+      "lower95": 0.6054995,
+      "upper95": 0.6186405
+    },
+    "aligned_minus_none_at_largest_N": {
+      "mean": 0.6991800000000001,
+      "lower95": 0.6979200000000001,
+      "upper95": 0.7006000000000001
+    }
+  },
+  "paired_effects": {
+    "wrong": {
+      "mean": 0.6124,
+      "lower95": 0.6054995,
+      "upper95": 0.6186405
+    },
+    "none": {
+      "mean": 0.6991800000000001,
+      "lower95": 0.6979200000000001,
+      "upper95": 0.7006000000000001
+    }
+  }
+}
