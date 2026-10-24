@@ -4,12 +4,13 @@
 
 ### Task-aligned quantum models for spectral classification
 
+[![arXiv](https://img.shields.io/badge/arXiv-2610.23834-b31b1b.svg)](https://arxiv.org/abs/2610.23834)
 [![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![JAX](https://img.shields.io/badge/JAX-numerics-A259FF)](https://github.com/jax-ml/jax)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
 [![EQUALITY](https://img.shields.io/badge/EU%20Horizon-EQUALITY-003399)](https://equality-quantum.eu/)
 
-Code and figure-generation notebooks accompanying our work on inductive bias in data-reuploading quantum circuits and its application to classification from synthetic-aperture-radar data.
+Code and figure-generation notebooks accompanying the paper [*Task-aligned spectral inductive biases in parameterized quantum circuits*](https://arxiv.org/abs/2610.23834) (arXiv:2610.23834).
 
 </div>
 
@@ -87,7 +88,19 @@ Result files of the classification experiments carry a hash of the full experime
 
 ## Citation
 
-If you use this code, please cite the accompanying paper. Citation details will be added upon publication.
+If you use this code, please cite the accompanying paper:
+
+```bibtex
+@misc{frohnert2026taskalignedspectralinductivebiases,
+      title={Task-aligned spectral inductive biases in parameterized quantum circuits},
+      author={Felix Frohnert and Adrián Pérez-Salinas and Sebastian Lange and Marcus Schwaebisch and Evert van Nieuwenburg and Vedran Dunjko},
+      year={2026},
+      eprint={2610.23834},
+      archivePrefix={arXiv},
+      primaryClass={quant-ph},
+      url={https://arxiv.org/abs/2610.23834},
+}
+```
 
 ## License
 

@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the accompanying paper."
+title: "SAR-QML: code for Task-aligned spectral inductive biases in parameterized quantum circuits"
+repository-code: "https://github.com/FelixFrohnertDB/SAR-QML"
+license: Apache-2.0
+authors:
+  - family-names: Frohnert
+    given-names: Felix
+  - family-names: Pérez-Salinas
+    given-names: Adrián
+  - family-names: Lange
+    given-names: Sebastian
+  - family-names: Schwaebisch
+    given-names: Marcus
+  - family-names: van Nieuwenburg
+    given-names: Evert
+  - family-names: Dunjko
+    given-names: Vedran
+preferred-citation:
+  type: article
+  title: "Task-aligned spectral inductive biases in parameterized quantum circuits"
+  authors:
+    - family-names: Frohnert
+      given-names: Felix
+    - family-names: Pérez-Salinas
+      given-names: Adrián
+    - family-names: Lange
+      given-names: Sebastian
+    - family-names: Schwaebisch
+      given-names: Marcus
+    - family-names: van Nieuwenburg
+      given-names: Evert
+    - family-names: Dunjko
+      given-names: Vedran
+  year: 2026
+  journal: "arXiv preprint"
+  identifiers:
+    - type: other
+      value: "arXiv:2610.23834"
+      description: "arXiv identifier"
+  url: "https://arxiv.org/abs/2610.23834"
