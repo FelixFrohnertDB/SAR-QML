@@ -26,10 +26,21 @@ The repository contains the Jupyter notebooks that generate every numerical figu
 ## Repository layout
 
 ```
-notebooks/   one self-contained notebook per figure (all model and experiment code lives here)
+notebooks/   one notebook per figure: configuration, model, experiment flow, figure
+src/sar_qml/ supporting code imported by the notebooks
 results/     cached paper results (CSV / JSON / NPZ) read by the notebooks
 figures/     figures written by the notebooks (PDF and PNG)
 ```
+
+The notebooks show the configuration, the circuit definitions, the top-level experiment flow and the figure code. Supporting code (linear algebra, samplers, scene generators, training loops, bootstrap statistics, checkpointing and plotting helpers) lives in the `sar_qml` package:
+
+| Module | Used by |
+|---|---|
+| `sar_qml.reuploading`, `reuploading_encoding`, `reuploading_query`, `reuploading_plotting` | `fig_01`, `fig_02`, `fig_01_02_combined` |
+| `sar_qml.alignment` | `fig_03` |
+| `sar_qml.teacher_student`, `teacher_student_training`, `teacher_student_curves`, `teacher_student_query_scan` | `fig_05`, `fig_06` |
+| `sar_qml.sar` (`geometry`, `gates`, `common`, `checkpoint`, `capacity_matched`, `double_reuploading`) | `fig_07`, `fig_08` |
+| `sar_qml.plotting` | shared plotting helpers |
 
 ## Installation
 
@@ -40,7 +51,7 @@ git clone https://github.com/FelixFrohnertDB/SAR-QML.git
 cd SAR-QML
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -e ".[notebooks]"
 jupyter lab
 ```
 

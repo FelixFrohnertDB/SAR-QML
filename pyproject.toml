@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sar-qml"
+version = "1.0.0"
+description = "Figure notebooks and helper code for task-aligned data re-uploading quantum circuits"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Felix Frohnert" }]
+requires-python = ">=3.10"
+dependencies = [
+    "jax==0.7.1",
+    "jaxlib==0.7.1",
+    "numpy==2.3.4",
+    "scipy==1.16.3",
+    "pandas==2.3.3",
+    "matplotlib==3.10.7",
+]
+
+[project.optional-dependencies]
+notebooks = ["jupyterlab", "ipykernel"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
